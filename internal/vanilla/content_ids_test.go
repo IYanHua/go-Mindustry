@@ -60,6 +60,31 @@ func TestApplyContentIDsRegistersUnitCommandAndStanceNames(t *testing.T) {
 	}
 }
 
+func TestApplyContentIDsRegistersStatusEffectAndAudioNames(t *testing.T) {
+	reg := protocol.NewContentRegistry()
+	ApplyContentIDs(reg, &ContentIDsFile{
+		Statuses: []ContentIDEntry{
+			{ID: 5, Name: "burning"},
+		},
+		Effects: []ContentIDEntry{
+			{ID: 9, Name: "rail-shot"},
+		},
+		Sounds: []ContentIDEntry{
+			{ID: 12, Name: "respawn"},
+		},
+	})
+
+	if got := reg.StatusEffect(5); got == nil || got.Name() != "burning" {
+		t.Fatalf("expected registered status effect name burning, got %#v", got)
+	}
+	if got := reg.Effect(9); got.Name != "rail-shot" {
+		t.Fatalf("expected registered effect name rail-shot, got %+v", got)
+	}
+	if got := reg.Sound(12); got.Name != "respawn" {
+		t.Fatalf("expected registered sound name respawn, got %+v", got)
+	}
+}
+
 func TestParseNamedNewEntriesMatchesUnitTypeSubclasses(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "UnitTypes.java")

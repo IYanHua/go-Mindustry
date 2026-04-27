@@ -1,6 +1,7 @@
 package worldstream
 
 import (
+	"bytes"
 	"os"
 	"path/filepath"
 	"strings"
@@ -380,14 +381,25 @@ func loadWeatheredChannelsModel(t *testing.T) *world.WorldModel {
 	return original
 }
 
-func TestBuildWorldStreamFromWeatheredChannelsPreservesMapTiles(t *testing.T) {
-	original := loadWeatheredChannelsModel(t)
+func TestBuildWorldStreamFromWeatheredChannelsPreservesRawMapChunk(t *testing.T) {
 	path := filepath.Join("..", "..", "assets", "worlds", "maps", "serpulo", "weatheredChannels.msav")
-	rawPayload, err := BuildWorldStreamFromMSAV(path)
+	data, err := readMSAV(path)
+	if err != nil {
+		t.Fatalf("read weatheredChannels msav: %v", err)
+	}
+	if err := skipMapData(newJavaReader(data.Map)); err != nil {
+		t.Skipf("weatheredChannels raw map chunk requires normalization: %v", err)
+	}
+
+	payload, err := BuildWorldStreamFromMSAV(path)
 	if err != nil {
 		t.Fatalf("build raw world stream: %v", err)
 	}
-	checkWorldStreamMatchesOriginalModel(t, "raw-msav", original, rawPayload)
+
+	_, _, mapChunk, _, _, _ := readWorldStreamCoreSections(t, payload, -1, -1, -1)
+	if !bytes.Equal(mapChunk, data.Map) {
+		t.Fatalf("expected weatheredChannels join-world map chunk to preserve raw msav map bytes, got len=%d want=%d", len(mapChunk), len(data.Map))
+	}
 }
 
 func TestBuildWorldStreamFromWeatheredChannelsModelPreservesMapTiles(t *testing.T) {

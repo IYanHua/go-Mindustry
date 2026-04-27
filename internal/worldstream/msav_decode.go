@@ -53,21 +53,21 @@ func LoadWorldModelFromMSAV(path string, content *protocol.ContentRegistry) (*wo
 }
 
 func decodeMapChunk(chunk []byte) (*world.WorldModel, error) {
-	return decodeMapChunkModern(chunk, nil)
+	return decodeMapChunkModern(chunk)
 }
 
 func decodeMapChunkForVersion(chunk []byte, version int32, blockNames map[int16]string) (*world.WorldModel, error) {
 	switch {
 	case version >= 10:
-		return decodeMapChunkModern(chunk, blockNames)
+		return decodeMapChunkModern(chunk)
 	case version >= 6:
-		return decodeMapChunkShortChunk(chunk, blockNames)
+		return decodeMapChunkShortChunk(chunk)
 	default:
 		return decodeMapChunkLegacy(chunk, blockNames)
 	}
 }
 
-func decodeMapChunkModern(chunk []byte, blockNames map[int16]string) (*world.WorldModel, error) {
+func decodeMapChunkModern(chunk []byte) (*world.WorldModel, error) {
 	r := newJavaReader(chunk)
 	width, err := r.ReadInt16()
 	if err != nil {
@@ -130,10 +130,27 @@ func decodeMapChunkModern(chunk []byte, blockNames map[int16]string) (*world.Wor
 		hadDataOld := (packed & 2) != 0
 		hadDataNew := (packed & 4) != 0
 		if hadDataNew {
-			// New data format: data + floorData + overlayData + extraData(int32).
-			if err := r.Skip(1 + 1 + 1 + 4); err != nil {
+			dataByte, err := r.ReadByte()
+			if err != nil {
 				return nil, err
 			}
+			floorData, err := r.ReadByte()
+			if err != nil {
+				return nil, err
+			}
+			overlayData, err := r.ReadByte()
+			if err != nil {
+				return nil, err
+			}
+			extraData, err := r.ReadInt32()
+			if err != nil {
+				return nil, err
+			}
+			t.HasData = true
+			t.Data = dataByte
+			t.FloorData = floorData
+			t.OverlayData = overlayData
+			t.ExtraData = extraData
 		}
 		if hadEntity {
 			isCenter, err := r.ReadByte()
@@ -152,10 +169,6 @@ func decodeMapChunkModern(chunk []byte, blockNames map[int16]string) (*world.Wor
 				if err != nil {
 					return nil, err
 				}
-
-				if !modernBlockHasEntity(blockNames, blockID) {
-					continue
-				}
 				if build, ok := decodeInlineBuildingChunk(chunk, t, blockID); ok {
 					t.Build = build
 					t.Team = build.Team
@@ -166,9 +179,12 @@ func decodeMapChunkModern(chunk []byte, blockNames map[int16]string) (*world.Wor
 			// Old data format (bit 2): one data byte when there is no entity.
 			// New data format (bit 3): already consumed above.
 			if hadDataOld {
-				if _, err := r.ReadByte(); err != nil {
+				dataByte, err := r.ReadByte()
+				if err != nil {
 					return nil, err
 				}
+				t.HasData = true
+				t.Data = dataByte
 			}
 		} else {
 			con, err := r.ReadByte()
@@ -190,7 +206,7 @@ func decodeMapChunkModern(chunk []byte, blockNames map[int16]string) (*world.Wor
 	return model, nil
 }
 
-func decodeMapChunkShortChunk(chunk []byte, blockNames map[int16]string) (*world.WorldModel, error) {
+func decodeMapChunkShortChunk(chunk []byte) (*world.WorldModel, error) {
 	r := newJavaReader(chunk)
 	width, err := r.ReadInt16()
 	if err != nil {
@@ -250,9 +266,27 @@ func decodeMapChunkShortChunk(chunk []byte, blockNames map[int16]string) (*world
 		hadDataOld := (packed & 2) != 0
 		hadDataNew := (packed & 4) != 0
 		if hadDataNew {
-			if err := r.Skip(1 + 1 + 1 + 4); err != nil {
+			dataByte, err := r.ReadByte()
+			if err != nil {
 				return nil, err
 			}
+			floorData, err := r.ReadByte()
+			if err != nil {
+				return nil, err
+			}
+			overlayData, err := r.ReadByte()
+			if err != nil {
+				return nil, err
+			}
+			extraData, err := r.ReadInt32()
+			if err != nil {
+				return nil, err
+			}
+			t.HasData = true
+			t.Data = dataByte
+			t.FloorData = floorData
+			t.OverlayData = overlayData
+			t.ExtraData = extraData
 		}
 		if hadEntity {
 			isCenter, err := r.ReadByte()
@@ -268,9 +302,6 @@ func decodeMapChunkShortChunk(chunk []byte, blockNames map[int16]string) (*world
 				if err != nil {
 					return nil, err
 				}
-				if !modernBlockHasEntity(blockNames, blockID) {
-					continue
-				}
 				if build, ok := decodeInlineBuildingChunk(payload, t, blockID); ok {
 					t.Build = build
 					t.Team = build.Team
@@ -279,9 +310,12 @@ func decodeMapChunkShortChunk(chunk []byte, blockNames map[int16]string) (*world
 			}
 		} else if hadDataOld || hadDataNew {
 			if hadDataOld {
-				if _, err := r.ReadByte(); err != nil {
+				dataByte, err := r.ReadByte()
+				if err != nil {
 					return nil, err
 				}
+				t.HasData = true
+				t.Data = dataByte
 			}
 		} else {
 			con, err := r.ReadByte()
@@ -397,28 +431,11 @@ func legacyBlockHasEntity(name string) bool {
 		return false
 	case strings.HasSuffix(name, "-floor"), strings.HasSuffix(name, "-water"), strings.HasSuffix(name, "-vent"):
 		return false
-	case strings.HasPrefix(name, "ore-"),
-		strings.Contains(name, "-ore-"),
-		strings.HasSuffix(name, "-ore"),
-		strings.Contains(name, "boulder"),
-		strings.Contains(name, "tree"),
-		strings.Contains(name, "bush"),
-		strings.Contains(name, "rock"):
+	case strings.Contains(name, "ore"), strings.Contains(name, "boulder"), strings.Contains(name, "tree"), strings.Contains(name, "bush"), strings.Contains(name, "rock"):
 		return false
 	default:
 		return true
 	}
-}
-
-func modernBlockHasEntity(blockNames map[int16]string, blockID int16) bool {
-	if len(blockNames) == 0 {
-		return true
-	}
-	name := strings.TrimSpace(blockNames[blockID])
-	if name == "" {
-		return true
-	}
-	return legacyBlockHasEntity(name)
 }
 
 func decodeLegacyBuildingChunk(chunk []byte, tile *world.Tile, blockID int16) (*world.Building, bool) {

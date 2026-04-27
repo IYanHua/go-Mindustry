@@ -153,8 +153,8 @@ func (s *Service) EnqueuePlans(owner int32, team world.TeamID, plans []*protocol
 	if s == nil || s.w == nil || len(plans) == 0 {
 		return
 	}
-	model := s.w.Model()
-	if model == nil || model.Width <= 0 || model.Height <= 0 {
+	width, height, ok := s.w.Bounds()
+	if !ok {
 		return
 	}
 
@@ -164,7 +164,7 @@ func (s *Service) EnqueuePlans(owner int32, team world.TeamID, plans []*protocol
 		if p == nil {
 			continue
 		}
-		op, ok := sanitizePlan(model, p)
+		op, ok := sanitizePlan(width, height, p)
 		if !ok {
 			continue
 		}
@@ -218,8 +218,8 @@ func (s *Service) SyncPlans(owner int32, team world.TeamID, plans []*protocol.Bu
 	if len(plans) == 0 {
 		return
 	}
-	model := s.w.Model()
-	if model == nil || model.Width <= 0 || model.Height <= 0 {
+	width, height, ok := s.w.Bounds()
+	if !ok {
 		return
 	}
 	ops := make([]world.BuildPlanOp, 0, len(plans))
@@ -228,7 +228,7 @@ func (s *Service) SyncPlans(owner int32, team world.TeamID, plans []*protocol.Bu
 		if p == nil {
 			continue
 		}
-		op, ok := sanitizePlan(model, p)
+		op, ok := sanitizePlan(width, height, p)
 		if !ok {
 			continue
 		}
@@ -322,13 +322,13 @@ func (s *Service) pushFront(b queuedBatch) {
 	s.queue[0] = b
 }
 
-func sanitizePlan(model *world.WorldModel, p *protocol.BuildPlan) (world.BuildPlanOp, bool) {
-	if p == nil || model == nil {
+func sanitizePlan(width, height int, p *protocol.BuildPlan) (world.BuildPlanOp, bool) {
+	if p == nil || width <= 0 || height <= 0 {
 		return world.BuildPlanOp{}, false
 	}
 	x := int(p.X)
 	y := int(p.Y)
-	if !model.InBounds(x, y) {
+	if x < 0 || y < 0 || x >= width || y >= height {
 		return world.BuildPlanOp{}, false
 	}
 	if p.Breaking {

@@ -256,10 +256,22 @@ func readClientPlansPayload(payload []byte, amount int, ctx *TypeIOContext) ([]*
 			}
 		}
 
-		rotationChoices := []bool{clientPlanBlockRotates(block)}
-		if _, ok := block.(BlockRef); ok {
-			rotationChoices = []bool{false, true}
+		rotationChoices := make([]bool, 0, 2)
+		addRotationChoice := func(v bool) {
+			for _, existing := range rotationChoices {
+				if existing == v {
+					return
+				}
+			}
+			rotationChoices = append(rotationChoices, v)
 		}
+		expectedRotation := clientPlanBlockRotates(block)
+		// Be permissive here: build preview packets omit an explicit "has rotation"
+		// flag, and a few block-name heuristics can disagree with the live client's
+		// rotate metadata. Try the expected layout first, then fall back to the
+		// opposite interpretation before rejecting the whole packet.
+		addRotationChoice(expectedRotation)
+		addRotationChoice(!expectedRotation)
 
 		baseUsed := offset + 6
 		for _, hasRotation := range rotationChoices {

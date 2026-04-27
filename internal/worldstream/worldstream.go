@@ -59,8 +59,16 @@ func BuildWorldStreamFromMSAV(path string) ([]byte, error) {
 		}
 		return nil, err
 	}
-	rawPayload, err := buildRawWorldStreamFromMSAVData(path, data, model)
-	if err == nil && len(rawPayload) > 0 {
+
+	rawPayload, rawErr := buildRawWorldStreamFromMSAVData(path, data, model)
+	rawMapReusable := skipMapData(newJavaReader(data.Map)) == nil
+	if rawErr == nil && len(rawPayload) > 0 {
+		// For modern maps whose raw map region already parses with the official
+		// SaveVersion.readMap layout, prefer the original bytes. This avoids
+		// losing map-authored building/entity payloads on complex maps.
+		if rawMapReusable {
+			return rawPayload, nil
+		}
 		if model != nil {
 			if ok, matchErr := worldStreamPayloadMatchesModel(rawPayload, model); matchErr == nil && ok {
 				return rawPayload, nil
@@ -77,12 +85,15 @@ func BuildWorldStreamFromMSAV(path string) ([]byte, error) {
 	if len(modelPayload) > 0 {
 		return modelPayload, nil
 	}
-	return rawPayload, err
+	return rawPayload, rawErr
 }
 
 func buildRawWorldStreamFromMSAVData(path string, data MSAVData, model *world.WorldModel) ([]byte, error) {
 	mapChunk := data.Map
 	if err := skipMapData(newJavaReader(mapChunk)); err != nil {
+		if len(mapChunk) == 0 {
+			goto build
+		}
 		if model == nil {
 			var loadErr error
 			model, loadErr = LoadWorldModelFromMSAV(path, nil)
@@ -96,6 +107,11 @@ func buildRawWorldStreamFromMSAVData(path string, data MSAVData, model *world.Wo
 			mapChunk = normalized
 		}
 	}
+build:
+	// NetworkIO.writeWorld sends current runtime team plans, not the raw team-block
+	// section preserved inside an arbitrary save file. Old saves can carry plan config
+	// objects that deserialize differently clientside, so keep join-world payloads on
+	// the safest legal representation until runtime-owned team plans are tracked.
 	var teamBlocks bytes.Buffer
 	if err := writeMinimalTeamBlocks(&javaWriter{buf: &teamBlocks}); err != nil {
 		return nil, err
@@ -216,7 +232,7 @@ func worldStreamPayloadMatchesModel(payload []byte, model *world.WorldModel) (bo
 	if err != nil {
 		return false, err
 	}
-	decoded, err := decodeMapChunkModern(mapChunk, model.BlockNames)
+	decoded, err := decodeMapChunkModern(mapChunk)
 	if err != nil {
 		return false, err
 	}
@@ -242,33 +258,161 @@ func worldStreamPayloadMatchesModel(payload []byte, model *world.WorldModel) (bo
 }
 
 func extractMapChunkFromWorldStreamPayload(payload []byte) ([]byte, error) {
-	zr, err := zlib.NewReader(bytes.NewReader(payload))
+	sections, err := readWorldStreamSectionsFromPayload(payload)
 	if err != nil {
 		return nil, err
+	}
+	return sections.Map, nil
+}
+
+type worldStreamSections struct {
+	Content    []byte
+	Patches    []byte
+	Map        []byte
+	TeamBlocks []byte
+	Markers    []byte
+	Custom     []byte
+}
+
+func readWorldStreamSectionsFromPayload(payload []byte) (worldStreamSections, error) {
+	if len(payload) == 0 {
+		return worldStreamSections{}, ErrInvalidMSAV
+	}
+	zr, err := zlib.NewReader(bytes.NewReader(payload))
+	if err != nil {
+		return worldStreamSections{}, err
 	}
 	raw, err := io.ReadAll(zr)
 	_ = zr.Close()
 	if err != nil {
-		return nil, err
+		return worldStreamSections{}, err
 	}
 	playerStart, err := locatePlayerStart(raw)
 	if err != nil {
-		return nil, err
+		return worldStreamSections{}, err
 	}
 	r := newJavaReader(raw[playerStart:])
 	playerRev, err := r.ReadInt16()
 	if err != nil {
-		return nil, err
+		return worldStreamSections{}, err
 	}
 	if err := skipPlayerPayload(r, playerRev); err != nil {
-		return nil, err
+		return worldStreamSections{}, err
 	}
 	contentStart := playerStart + r.Offset()
-	_, patchesEnd, mapEnd, _, _, _, _, err := inspectWorldSections(raw, contentStart)
+	contentEnd, patchesEnd, mapEnd, teamBlocksLen, markersLen, customLen, chunked, err := inspectWorldSections(raw, contentStart)
+	if err != nil {
+		return worldStreamSections{}, err
+	}
+
+	if chunked {
+		chunkReader := newJavaReader(raw[contentStart:])
+		readChunk := func() ([]byte, error) {
+			chunk, err := chunkReader.ReadChunk()
+			if err != nil {
+				return nil, err
+			}
+			return append([]byte(nil), chunk...), nil
+		}
+		content, err := readChunk()
+		if err != nil {
+			return worldStreamSections{}, err
+		}
+		patches, err := readChunk()
+		if err != nil {
+			return worldStreamSections{}, err
+		}
+		mapChunk, err := readChunk()
+		if err != nil {
+			return worldStreamSections{}, err
+		}
+		teamBlocks, err := readChunk()
+		if err != nil {
+			return worldStreamSections{}, err
+		}
+		markers, err := readChunk()
+		if err != nil {
+			return worldStreamSections{}, err
+		}
+		custom, err := readChunk()
+		if err != nil {
+			return worldStreamSections{}, err
+		}
+		return worldStreamSections{
+			Content:    content,
+			Patches:    patches,
+			Map:        mapChunk,
+			TeamBlocks: teamBlocks,
+			Markers:    markers,
+			Custom:     custom,
+		}, nil
+	}
+
+	if contentStart > len(raw) || contentEnd > len(raw) || patchesEnd > len(raw) || mapEnd > len(raw) {
+		return worldStreamSections{}, io.ErrUnexpectedEOF
+	}
+	tail := raw[mapEnd:]
+	if teamBlocksLen > len(tail) {
+		return worldStreamSections{}, io.ErrUnexpectedEOF
+	}
+	teamBlocks := append([]byte(nil), tail[:teamBlocksLen]...)
+	tail = tail[teamBlocksLen:]
+	if markersLen > len(tail) {
+		return worldStreamSections{}, io.ErrUnexpectedEOF
+	}
+	markers := append([]byte(nil), tail[:markersLen]...)
+	tail = tail[markersLen:]
+	if customLen > len(tail) {
+		return worldStreamSections{}, io.ErrUnexpectedEOF
+	}
+	custom := append([]byte(nil), tail[:customLen]...)
+	return worldStreamSections{
+		Content:    append([]byte(nil), raw[contentStart:contentEnd]...),
+		Patches:    append([]byte(nil), raw[contentEnd:patchesEnd]...),
+		Map:        append([]byte(nil), raw[patchesEnd:mapEnd]...),
+		TeamBlocks: teamBlocks,
+		Markers:    markers,
+		Custom:     custom,
+	}, nil
+}
+
+// LoadWorldModelFromWorldStreamPayload decodes the same structural world baseline
+// the client receives in the initial WorldStream payload.
+func LoadWorldModelFromWorldStreamPayload(payload []byte, content *protocol.ContentRegistry) (*world.WorldModel, error) {
+	sections, err := readWorldStreamSectionsFromPayload(payload)
 	if err != nil {
 		return nil, err
 	}
-	return append([]byte(nil), raw[patchesEnd:mapEnd]...), nil
+
+	blockNames, _ := readContentBlockNames(sections.Content, nil)
+	if len(blockNames) == 0 && content != nil {
+		if names := readContentNamesFromRegistry(1, content); len(names) > 0 {
+			blockNames = names
+		}
+	}
+
+	model, err := decodeMapChunkModern(sections.Map)
+	if err != nil {
+		return nil, err
+	}
+	model.Content = sections.Content
+	model.Patches = sections.Patches
+	model.RawMap = sections.Map
+	model.TeamBlocks = sections.TeamBlocks
+	model.Markers = sections.Markers
+	model.Custom = sections.Custom
+	if len(blockNames) > 0 {
+		model.BlockNames = blockNames
+		hydrateInlineBuildingConfigs(model)
+	}
+	if unitNames, err := readContentUnitNames(sections.Content, nil); err == nil && len(unitNames) > 0 {
+		model.UnitNames = unitNames
+	} else if content != nil {
+		if names := readContentNamesFromRegistry(6, content); len(names) > 0 {
+			model.UnitNames = names
+		}
+	}
+	return model, nil
 }
 
 func clearInlineBuildingSyncData(model *world.WorldModel) {

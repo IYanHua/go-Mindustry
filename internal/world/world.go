@@ -31,6 +31,14 @@ type Snapshot struct {
 	Tick     uint64
 }
 
+func (s Snapshot) WaveTimeTicks() float32 {
+	tps := s.Tps
+	if tps <= 0 {
+		tps = 60
+	}
+	return s.WaveTime * float32(tps)
+}
+
 type TeamCoreItemSnapshot struct {
 	Team  TeamID
 	Items []ItemStack
@@ -191,6 +199,20 @@ type World struct {
 	blockOccupancy              map[int32]int32
 	activeTilePositions         []int32
 	itemLogisticsTilePositions  []int32
+	itemConveyorTilePositions   []int32
+	itemDuctTilePositions       []int32
+	itemRouterTilePositions     []int32
+	itemBridgeTilePositions     []int32
+	itemUnloaderTilePositions   []int32
+	itemMassDriverTilePositions []int32
+	sandboxItemSourceTiles      []int32
+	sandboxLiquidSourceTiles    []int32
+	liquidConduitTilePositions  []int32
+	liquidStorageTilePositions  []int32
+	liquidBridgeTilePositions   []int32
+	payloadFactoryTilePositions []int32
+	payloadTransportTiles       []int32
+	reactorTilePositions        []int32
 	crafterTilePositions        []int32
 	drillTilePositions          []int32
 	burstDrillTilePositions     []int32
@@ -1741,124 +1763,138 @@ func New(cfg Config) *World {
 	}
 	rng := rand.New(rand.NewSource(time.Now().UnixNano()))
 	return &World{
-		wave:                       1,
-		waveTime:                   0,
-		tick:                       0,
-		rand0:                      rng.Int63(),
-		rand1:                      rng.Int63(),
-		tps:                        int8(tps),
-		actualTps:                  int8(tps),
-		tpsWindowStart:             time.Now(),
-		start:                      time.Now(),
-		useMapSyncDataFallback:     cfg.UseMapSyncDataFallback,
-		blockSyncLogsEnabled:       cfg.BlockSyncLogsEnabled,
-		pendingMountShots:          []pendingMountShot{},
-		bulletNextID:               1,
-		blockItemSyncTick:          map[int32]uint64{},
-		buildStates:                map[int32]buildCombatState{},
-		controlledBuilds:           map[int32]controlledBuildState{},
-		controlledBuildByPlayer:    map[int32]int32{},
-		pendingBuilds:              map[int32]pendingBuildState{},
-		pendingBreaks:              map[int32]pendingBreakState{},
-		buildRejectLogTick:         map[int32]uint64{},
-		builderStates:              map[int32]builderRuntimeState{},
-		teamRebuildPlans:           map[TeamID][]rebuildBlockPlan{},
-		teamAIBuildPlans:           map[TeamID][]teamBuildPlan{},
-		teamBuildAIStates:          map[TeamID]buildAIPlannerState{},
-		factoryStates:              map[int32]factoryState{},
-		reconstructorStates:        map[int32]reconstructorState{},
-		drillStates:                map[int32]drillRuntimeState{},
-		burstDrillStates:           map[int32]burstDrillRuntimeState{},
-		beamDrillStates:            map[int32]beamDrillRuntimeState{},
-		pumpStates:                 map[int32]pumpRuntimeState{},
-		crafterStates:              map[int32]crafterRuntimeState{},
-		heatStates:                 map[int32]float32{},
-		incineratorStates:          map[int32]float32{},
-		repairTurretStates:         map[int32]repairTurretRuntimeState{},
-		repairTowerStates:          map[int32]repairTowerRuntimeState{},
-		teamPowerStates:            map[TeamID]*teamPowerState{},
-		teamPowerBudget:            map[TeamID]float32{},
-		powerNetStates:             map[int32]*powerNetState{},
-		powerNetByPos:              map[int32]int32{},
-		powerNetDirty:              true,
-		powerStorageState:          map[int32]float32{},
-		powerRequested:             map[int32]float32{},
-		powerSupplied:              map[int32]float32{},
-		powerGeneratorState:        map[int32]*powerGeneratorState{},
-		unitMountCDs:               map[int32][]float32{},
-		unitMountStates:            map[int32][]unitMountState{},
-		unitTargets:                map[int32]targetTrackState{},
-		unitAIStates:               map[int32]unitAIState{},
-		unitMiningStates:           map[int32]unitMiningState{},
-		teamItems:                  map[TeamID]map[ItemID]int32{},
-		teamBuilderSpeed:           map[TeamID]float32{1: 0.5},
-		itemSourceCfg:              map[int32]ItemID{},
-		liquidSourceCfg:            map[int32]LiquidID{},
-		sorterCfg:                  map[int32]ItemID{},
-		unloaderCfg:                map[int32]ItemID{},
-		payloadRouterCfg:           map[int32]protocol.Content{},
-		powerNodeLinks:             map[int32][]int32{},
-		bridgeLinks:                map[int32]int32{},
-		massDriverLinks:            map[int32]int32{},
-		payloadDriverLinks:         map[int32]int32{},
-		bridgeBuffers:              map[int32][]bufferedBridgeItem{},
-		bridgeAcceptAcc:            map[int32]float32{},
-		conveyorStates:             map[int32]*conveyorRuntimeState{},
-		ductStates:                 map[int32]*ductRuntimeState{},
-		routerStates:               map[int32]*routerRuntimeState{},
-		stackStates:                map[int32]*stackRuntimeState{},
-		massDriverStates:           map[int32]*massDriverRuntimeState{},
-		payloadStates:              map[int32]*payloadRuntimeState{},
-		payloadDeconstructorStates: map[int32]*payloadDeconstructorState{},
-		payloadDriverStates:        map[int32]*payloadDriverRuntimeState{},
-		massDriverShots:            []massDriverShot{},
-		payloadDriverShots:         []payloadDriverShot{},
-		blockDumpIndex:             map[int32]int{},
-		dumpNeighborCache:          map[int32][]int32{},
-		unloaderLastUsed:           map[int64]int{},
-		itemSourceAccum:            map[int32]float32{},
-		routerInputPos:             map[int32]int32{},
-		routerRotation:             map[int32]byte{},
-		transportAccum:             map[int32]float32{},
-		junctionQueues:             map[int32]junctionQueueState{},
-		bridgeIncomingMask:         map[int32]byte{},
-		reactorStates:              map[int32]nuclearReactorState{},
-		storageLinkedCore:          map[int32]int32{},
-		teamPrimaryCore:            map[TeamID]int32{},
-		coreStorageCapacity:        map[int32]int32{},
-		blockOccupancy:             map[int32]int32{},
-		itemLogisticsTilePositions: []int32{},
-		crafterTilePositions:       []int32{},
-		drillTilePositions:         []int32{},
-		burstDrillTilePositions:    []int32{},
-		beamDrillTilePositions:     []int32{},
-		pumpTilePositions:          []int32{},
-		incineratorTilePositions:   []int32{},
-		repairTurretTilePositions:  []int32{},
-		repairTowerTilePositions:   []int32{},
-		factoryTilePositions:       []int32{},
-		heatConductorTilePositions: []int32{},
-		powerTilePositions:         []int32{},
-		powerDiodeTilePositions:    []int32{},
-		powerVoidTilePositions:     []int32{},
-		teamBuildingTiles:          map[TeamID][]int32{},
-		teamBuildingSpatial:        map[TeamID]*buildingSpatialIndex{},
-		teamCoreTiles:              map[TeamID][]int32{},
-		teamPowerTiles:             map[TeamID][]int32{},
-		teamPowerNodeTiles:         map[TeamID][]int32{},
-		turretTilePositions:        []int32{},
-		unitProfilesByType:         cloneUnitWeaponProfiles(weaponProfilesByType),
-		unitProfilesByName:         map[string]weaponProfile{},
-		unitRuntimeProfilesByName:  map[string]unitRuntimeProfile{},
-		unitMountProfilesByName:    map[string][]unitWeaponMountProfile{},
-		buildingProfilesByName:     cloneBuildingWeaponProfiles(buildingWeaponProfilesByName),
-		blockCostsByName:           map[string][]ItemStack{},
-		blockBuildTimesByName:      map[string]float32{},
-		blockArmorByName:           map[string]float32{},
-		statusProfilesByID:         map[int16]statusEffectProfile{},
-		statusProfilesByName:       map[string]statusEffectProfile{},
-		rulesMgr:                   NewRulesManager(nil),
-		wavesMgr:                   NewWaveManager(nil),
+		wave:                        1,
+		waveTime:                    0,
+		tick:                        0,
+		rand0:                       rng.Int63(),
+		rand1:                       rng.Int63(),
+		tps:                         int8(tps),
+		actualTps:                   int8(tps),
+		tpsWindowStart:              time.Now(),
+		start:                       time.Now(),
+		useMapSyncDataFallback:      cfg.UseMapSyncDataFallback,
+		blockSyncLogsEnabled:        cfg.BlockSyncLogsEnabled,
+		pendingMountShots:           []pendingMountShot{},
+		bulletNextID:                1,
+		blockItemSyncTick:           map[int32]uint64{},
+		buildStates:                 map[int32]buildCombatState{},
+		controlledBuilds:            map[int32]controlledBuildState{},
+		controlledBuildByPlayer:     map[int32]int32{},
+		pendingBuilds:               map[int32]pendingBuildState{},
+		pendingBreaks:               map[int32]pendingBreakState{},
+		buildRejectLogTick:          map[int32]uint64{},
+		builderStates:               map[int32]builderRuntimeState{},
+		teamRebuildPlans:            map[TeamID][]rebuildBlockPlan{},
+		teamAIBuildPlans:            map[TeamID][]teamBuildPlan{},
+		teamBuildAIStates:           map[TeamID]buildAIPlannerState{},
+		factoryStates:               map[int32]factoryState{},
+		reconstructorStates:         map[int32]reconstructorState{},
+		drillStates:                 map[int32]drillRuntimeState{},
+		burstDrillStates:            map[int32]burstDrillRuntimeState{},
+		beamDrillStates:             map[int32]beamDrillRuntimeState{},
+		pumpStates:                  map[int32]pumpRuntimeState{},
+		crafterStates:               map[int32]crafterRuntimeState{},
+		heatStates:                  map[int32]float32{},
+		incineratorStates:           map[int32]float32{},
+		repairTurretStates:          map[int32]repairTurretRuntimeState{},
+		repairTowerStates:           map[int32]repairTowerRuntimeState{},
+		teamPowerStates:             map[TeamID]*teamPowerState{},
+		teamPowerBudget:             map[TeamID]float32{},
+		powerNetStates:              map[int32]*powerNetState{},
+		powerNetByPos:               map[int32]int32{},
+		powerNetDirty:               true,
+		powerStorageState:           map[int32]float32{},
+		powerRequested:              map[int32]float32{},
+		powerSupplied:               map[int32]float32{},
+		powerGeneratorState:         map[int32]*powerGeneratorState{},
+		unitMountCDs:                map[int32][]float32{},
+		unitMountStates:             map[int32][]unitMountState{},
+		unitTargets:                 map[int32]targetTrackState{},
+		unitAIStates:                map[int32]unitAIState{},
+		unitMiningStates:            map[int32]unitMiningState{},
+		teamItems:                   map[TeamID]map[ItemID]int32{},
+		teamBuilderSpeed:            map[TeamID]float32{1: 0.5},
+		itemSourceCfg:               map[int32]ItemID{},
+		liquidSourceCfg:             map[int32]LiquidID{},
+		sorterCfg:                   map[int32]ItemID{},
+		unloaderCfg:                 map[int32]ItemID{},
+		payloadRouterCfg:            map[int32]protocol.Content{},
+		powerNodeLinks:              map[int32][]int32{},
+		bridgeLinks:                 map[int32]int32{},
+		massDriverLinks:             map[int32]int32{},
+		payloadDriverLinks:          map[int32]int32{},
+		bridgeBuffers:               map[int32][]bufferedBridgeItem{},
+		bridgeAcceptAcc:             map[int32]float32{},
+		conveyorStates:              map[int32]*conveyorRuntimeState{},
+		ductStates:                  map[int32]*ductRuntimeState{},
+		routerStates:                map[int32]*routerRuntimeState{},
+		stackStates:                 map[int32]*stackRuntimeState{},
+		massDriverStates:            map[int32]*massDriverRuntimeState{},
+		payloadStates:               map[int32]*payloadRuntimeState{},
+		payloadDeconstructorStates:  map[int32]*payloadDeconstructorState{},
+		payloadDriverStates:         map[int32]*payloadDriverRuntimeState{},
+		massDriverShots:             []massDriverShot{},
+		payloadDriverShots:          []payloadDriverShot{},
+		blockDumpIndex:              map[int32]int{},
+		dumpNeighborCache:           map[int32][]int32{},
+		unloaderLastUsed:            map[int64]int{},
+		itemSourceAccum:             map[int32]float32{},
+		routerInputPos:              map[int32]int32{},
+		routerRotation:              map[int32]byte{},
+		transportAccum:              map[int32]float32{},
+		junctionQueues:              map[int32]junctionQueueState{},
+		bridgeIncomingMask:          map[int32]byte{},
+		reactorStates:               map[int32]nuclearReactorState{},
+		storageLinkedCore:           map[int32]int32{},
+		teamPrimaryCore:             map[TeamID]int32{},
+		coreStorageCapacity:         map[int32]int32{},
+		blockOccupancy:              map[int32]int32{},
+		itemLogisticsTilePositions:  []int32{},
+		itemConveyorTilePositions:   []int32{},
+		itemDuctTilePositions:       []int32{},
+		itemRouterTilePositions:     []int32{},
+		itemBridgeTilePositions:     []int32{},
+		itemUnloaderTilePositions:   []int32{},
+		itemMassDriverTilePositions: []int32{},
+		sandboxItemSourceTiles:      []int32{},
+		sandboxLiquidSourceTiles:    []int32{},
+		liquidConduitTilePositions:  []int32{},
+		liquidStorageTilePositions:  []int32{},
+		liquidBridgeTilePositions:   []int32{},
+		payloadFactoryTilePositions: []int32{},
+		payloadTransportTiles:       []int32{},
+		reactorTilePositions:        []int32{},
+		crafterTilePositions:        []int32{},
+		drillTilePositions:          []int32{},
+		burstDrillTilePositions:     []int32{},
+		beamDrillTilePositions:      []int32{},
+		pumpTilePositions:           []int32{},
+		incineratorTilePositions:    []int32{},
+		repairTurretTilePositions:   []int32{},
+		repairTowerTilePositions:    []int32{},
+		factoryTilePositions:        []int32{},
+		heatConductorTilePositions:  []int32{},
+		powerTilePositions:          []int32{},
+		powerDiodeTilePositions:     []int32{},
+		powerVoidTilePositions:      []int32{},
+		teamBuildingTiles:           map[TeamID][]int32{},
+		teamBuildingSpatial:         map[TeamID]*buildingSpatialIndex{},
+		teamCoreTiles:               map[TeamID][]int32{},
+		teamPowerTiles:              map[TeamID][]int32{},
+		teamPowerNodeTiles:          map[TeamID][]int32{},
+		turretTilePositions:         []int32{},
+		unitProfilesByType:          cloneUnitWeaponProfiles(weaponProfilesByType),
+		unitProfilesByName:          map[string]weaponProfile{},
+		unitRuntimeProfilesByName:   map[string]unitRuntimeProfile{},
+		unitMountProfilesByName:     map[string][]unitWeaponMountProfile{},
+		buildingProfilesByName:      cloneBuildingWeaponProfiles(buildingWeaponProfilesByName),
+		blockCostsByName:            map[string][]ItemStack{},
+		blockBuildTimesByName:       map[string]float32{},
+		blockArmorByName:            map[string]float32{},
+		statusProfilesByID:          map[int16]statusEffectProfile{},
+		statusProfilesByName:        map[string]statusEffectProfile{},
+		rulesMgr:                    NewRulesManager(nil),
+		wavesMgr:                    NewWaveManager(nil),
 	}
 }
 
@@ -1936,7 +1972,6 @@ func (w *World) Step(delta time.Duration) {
 	w.stepHeatConductorsLocked()
 	w.stepIncinerators(delta)
 	w.stepRepairBlocks(delta)
-	w.stepBulletsLocked(delta)
 	w.stepSupportBuildingsLocked(delta)
 	factoryDur := time.Since(factoryStartedAt)
 
@@ -2093,33 +2128,10 @@ func (w *World) BuildingInfoPacked(pos int32) (BuildingInfo, bool) {
 	defer w.mu.RUnlock()
 
 	index, ok := w.buildingIndexFromPackedPosLocked(pos)
-	if !ok {
+	if !ok || w.model == nil || index < 0 || int(index) >= len(w.model.Tiles) {
 		return BuildingInfo{}, false
 	}
-	return w.buildingInfoForTileIndexLocked(index)
-}
-
-func (w *World) BuildingInfoTileIndex(pos int32) (BuildingInfo, bool) {
-	w.mu.RLock()
-	defer w.mu.RUnlock()
-	return w.buildingInfoForTileIndexLocked(pos)
-}
-
-func (w *World) TileIndexFromPackedPos(pos int32) (int32, bool) {
-	w.mu.RLock()
-	defer w.mu.RUnlock()
-	return w.tileIndexFromPackedPosLocked(pos)
-}
-
-func (w *World) buildingInfoForTileIndexLocked(index int32) (BuildingInfo, bool) {
-	if w.model == nil || index < 0 || int(index) >= len(w.model.Tiles) {
-		return BuildingInfo{}, false
-	}
-	center, ok := w.centerBuildingIndexLocked(index)
-	if !ok || center < 0 || int(center) >= len(w.model.Tiles) {
-		return BuildingInfo{}, false
-	}
-	tile := &w.model.Tiles[center]
+	tile := &w.model.Tiles[index]
 	if tile.Block == 0 || tile.Build == nil {
 		return BuildingInfo{}, false
 	}
@@ -2948,7 +2960,7 @@ func (w *World) stepSandboxSources(delta time.Duration) {
 	if liquidRate < 1 {
 		liquidRate = 1
 	}
-	for _, pos := range w.activeTilePositions {
+	for _, pos := range w.sandboxItemSourceTiles {
 		if pos < 0 || int(pos) >= len(w.model.Tiles) {
 			continue
 		}
@@ -2956,15 +2968,20 @@ func (w *World) stepSandboxSources(delta time.Duration) {
 		if tile.Build == nil || tile.Block == 0 {
 			continue
 		}
-		switch w.blockNameByID(int16(tile.Block)) {
-		case "item-source":
-			if item, ok := w.itemSourceCfg[pos]; ok {
-				w.pushItemSourceLocked(pos, tile, item, frameDelta)
-			}
-		case "liquid-source":
-			if liquid, ok := w.liquidSourceCfg[pos]; ok {
-				w.pushLiquidSourceLocked(pos, tile, liquid, liquidRate)
-			}
+		if item, ok := w.itemSourceCfg[pos]; ok {
+			w.pushItemSourceLocked(pos, tile, item, frameDelta)
+		}
+	}
+	for _, pos := range w.sandboxLiquidSourceTiles {
+		if pos < 0 || int(pos) >= len(w.model.Tiles) {
+			continue
+		}
+		tile := &w.model.Tiles[pos]
+		if tile.Build == nil || tile.Block == 0 {
+			continue
+		}
+		if liquid, ok := w.liquidSourceCfg[pos]; ok {
+			w.pushLiquidSourceLocked(pos, tile, liquid, liquidRate)
 		}
 	}
 }
@@ -3215,12 +3232,12 @@ func (w *World) stepNuclearReactors(delta time.Duration) {
 		reactorSmokeThreshold     = float32(0.3)
 		reactorSmokeRadius        = float32(12)
 	)
-	for _, pos := range w.activeTilePositions {
+	for _, pos := range w.reactorTilePositions {
 		if pos < 0 || int(pos) >= len(w.model.Tiles) {
 			continue
 		}
 		tile := &w.model.Tiles[pos]
-		if tile.Build == nil || tile.Block == 0 || w.blockNameByID(int16(tile.Block)) != "thorium-reactor" {
+		if tile.Build == nil || tile.Block == 0 {
 			continue
 		}
 		state := w.reactorStates[pos]
@@ -3288,7 +3305,7 @@ func (w *World) stepLiquidLogistics(delta time.Duration) {
 	if dt <= 0 {
 		return
 	}
-	for _, pos := range w.activeTilePositions {
+	for _, pos := range w.liquidConduitTilePositions {
 		if pos < 0 || int(pos) >= len(w.model.Tiles) {
 			continue
 		}
@@ -3305,10 +3322,29 @@ func (w *World) stepLiquidLogistics(delta time.Duration) {
 			w.stepConduitLocked(pos, tile, 1.025, false, dt)
 		case "reinforced-conduit":
 			w.stepConduitLocked(pos, tile, 1.03, true, dt)
-		case "liquid-router", "liquid-container", "liquid-tank", "reinforced-liquid-router", "reinforced-liquid-container", "reinforced-liquid-tank":
-			if liquid, _, ok := firstBuildingLiquid(tile.Build); ok {
-				w.dumpLiquidLocked(pos, tile, liquid, dt*60)
-			}
+		}
+	}
+	for _, pos := range w.liquidStorageTilePositions {
+		if pos < 0 || int(pos) >= len(w.model.Tiles) {
+			continue
+		}
+		tile := &w.model.Tiles[pos]
+		if tile.Build == nil || tile.Block == 0 {
+			continue
+		}
+		if liquid, _, ok := firstBuildingLiquid(tile.Build); ok {
+			w.dumpLiquidLocked(pos, tile, liquid, dt*60)
+		}
+	}
+	for _, pos := range w.liquidBridgeTilePositions {
+		if pos < 0 || int(pos) >= len(w.model.Tiles) {
+			continue
+		}
+		tile := &w.model.Tiles[pos]
+		if tile.Build == nil || tile.Block == 0 {
+			continue
+		}
+		switch w.blockNameByID(int16(tile.Block)) {
 		case "bridge-conduit", "phase-conduit":
 			w.stepLiquidBridgeLocked(pos, tile, dt)
 		case "reinforced-bridge-conduit":
@@ -3889,6 +3925,97 @@ func isItemLogisticsBlockName(name string) bool {
 	}
 }
 
+func isItemConveyorBlockName(name string) bool {
+	switch name {
+	case "conveyor", "titanium-conveyor", "armored-conveyor", "plastanium-conveyor", "surge-conveyor":
+		return true
+	default:
+		return false
+	}
+}
+
+func isItemDuctBlockName(name string) bool {
+	switch name {
+	case "duct", "armored-duct", "duct-router", "overflow-duct", "underflow-duct", "duct-bridge", "duct-unloader":
+		return true
+	default:
+		return false
+	}
+}
+
+func isItemRouterBlockName(name string) bool {
+	switch name {
+	case "router", "distributor", "surge-router":
+		return true
+	default:
+		return false
+	}
+}
+
+func isItemBridgeBlockName(name string) bool {
+	switch name {
+	case "bridge-conveyor", "phase-conveyor":
+		return true
+	default:
+		return false
+	}
+}
+
+func isItemUnloaderBlockName(name string) bool {
+	return name == "unloader"
+}
+
+func isLiquidConduitBlockName(name string) bool {
+	switch name {
+	case "conduit", "pulse-conduit", "plated-conduit", "reinforced-conduit":
+		return true
+	default:
+		return false
+	}
+}
+
+func isLiquidStorageBlockName(name string) bool {
+	switch name {
+	case "liquid-router", "liquid-container", "liquid-tank",
+		"reinforced-liquid-router", "reinforced-liquid-container", "reinforced-liquid-tank":
+		return true
+	default:
+		return false
+	}
+}
+
+func isLiquidBridgeBlockName(name string) bool {
+	switch name {
+	case "bridge-conduit", "phase-conduit", "reinforced-bridge-conduit":
+		return true
+	default:
+		return false
+	}
+}
+
+func isPayloadFactoryBlockName(name string) bool {
+	switch name {
+	case "ground-factory", "air-factory", "naval-factory":
+		return true
+	default:
+		return false
+	}
+}
+
+func isPayloadTransportBlockName(name string) bool {
+	switch name {
+	case "payload-conveyor", "reinforced-payload-conveyor",
+		"payload-router", "reinforced-payload-router",
+		"payload-void",
+		"small-deconstructor", "deconstructor", "payload-deconstructor",
+		"payload-mass-driver", "large-payload-mass-driver",
+		"payload-loader", "payload-unloader":
+		return true
+	default:
+		return false
+	}
+}
+
 func (w *World) stepItemLogistics(delta time.Duration, profileDetails bool) itemLogisticsPerf {
 	var perf itemLogisticsPerf
 	if w.model == nil {
@@ -3907,7 +4034,11 @@ func (w *World) stepItemLogistics(delta time.Duration, profileDetails bool) item
 		perf.Junctions = time.Since(junctionStartedAt)
 		perf.JunctionCount = len(w.junctionQueues)
 	}
-	for _, pos := range w.itemLogisticsTilePositions {
+	var conveyorStartedAt time.Time
+	if profileDetails {
+		conveyorStartedAt = time.Now()
+	}
+	for _, pos := range w.itemConveyorTilePositions {
 		if pos < 0 || int(pos) >= len(w.model.Tiles) {
 			continue
 		}
@@ -3915,28 +4046,34 @@ func (w *World) stepItemLogistics(delta time.Duration, profileDetails bool) item
 		if tile.Build == nil || tile.Block == 0 {
 			continue
 		}
-		name := w.blockNameByID(int16(tile.Block))
-		switch name {
+		switch w.blockNameByID(int16(tile.Block)) {
 		case "conveyor":
-			var startedAt time.Time
-			if profileDetails {
-				startedAt = time.Now()
-			}
 			w.stepConveyorLocked(pos, tile, 0.03, dt)
-			if profileDetails {
-				perf.Conveyor += time.Since(startedAt)
-				perf.ConveyorCount++
-			}
 		case "titanium-conveyor", "armored-conveyor":
-			var startedAt time.Time
-			if profileDetails {
-				startedAt = time.Now()
-			}
 			w.stepConveyorLocked(pos, tile, 0.08, dt)
-			if profileDetails {
-				perf.Conveyor += time.Since(startedAt)
-				perf.ConveyorCount++
-			}
+		case "plastanium-conveyor":
+			w.stepStackConveyorLocked(pos, tile, 4.0/60.0, 2, true, dt)
+		case "surge-conveyor":
+			w.stepStackConveyorLocked(pos, tile, 5.0/60.0, 2, false, dt)
+		}
+	}
+	if profileDetails {
+		perf.Conveyor += time.Since(conveyorStartedAt)
+		perf.ConveyorCount += len(w.itemConveyorTilePositions)
+	}
+	var ductStartedAt time.Time
+	if profileDetails {
+		ductStartedAt = time.Now()
+	}
+	for _, pos := range w.itemDuctTilePositions {
+		if pos < 0 || int(pos) >= len(w.model.Tiles) {
+			continue
+		}
+		tile := &w.model.Tiles[pos]
+		if tile.Build == nil || tile.Block == 0 {
+			continue
+		}
+		switch w.blockNameByID(int16(tile.Block)) {
 		case "duct":
 			var startedAt time.Time
 			if profileDetails {
@@ -4007,87 +4144,92 @@ func (w *World) stepItemLogistics(delta time.Duration, profileDetails bool) item
 				perf.Unloader += time.Since(startedAt)
 				perf.UnloaderCount++
 			}
-		case "router", "distributor":
-			var startedAt time.Time
-			if profileDetails {
-				startedAt = time.Now()
-			}
-			w.stepRouterLocked(pos, tile, 8, dt)
-			if profileDetails {
-				perf.Router += time.Since(startedAt)
-				perf.RouterCount++
-			}
-		case "bridge-conveyor":
-			var startedAt time.Time
-			if profileDetails {
-				startedAt = time.Now()
-			}
-			w.stepBridgeConveyorLocked(pos, tile, 11, dt)
-			if profileDetails {
-				perf.Bridge += time.Since(startedAt)
-				perf.BridgeCount++
-			}
-		case "phase-conveyor":
-			var startedAt time.Time
-			if profileDetails {
-				startedAt = time.Now()
-			}
-			w.stepPhaseConveyorLocked(pos, tile, dt)
-			if profileDetails {
-				perf.Bridge += time.Since(startedAt)
-				perf.BridgeCount++
-			}
-		case "plastanium-conveyor":
-			var startedAt time.Time
-			if profileDetails {
-				startedAt = time.Now()
-			}
-			w.stepStackConveyorLocked(pos, tile, 4.0/60.0, 2, true, dt)
-			if profileDetails {
-				perf.Conveyor += time.Since(startedAt)
-				perf.ConveyorCount++
-			}
-		case "surge-conveyor":
-			var startedAt time.Time
-			if profileDetails {
-				startedAt = time.Now()
-			}
-			w.stepStackConveyorLocked(pos, tile, 5.0/60.0, 2, false, dt)
-			if profileDetails {
-				perf.Conveyor += time.Since(startedAt)
-				perf.ConveyorCount++
-			}
-		case "surge-router":
-			var startedAt time.Time
-			if profileDetails {
-				startedAt = time.Now()
-			}
-			w.stepStackRouterLocked(pos, tile, 6, dt)
-			if profileDetails {
-				perf.Router += time.Since(startedAt)
-				perf.RouterCount++
-			}
-		case "unloader":
-			var startedAt time.Time
-			if profileDetails {
-				startedAt = time.Now()
-			}
-			w.stepUnloaderLocked(pos, tile, dt)
-			if profileDetails {
-				perf.Unloader += time.Since(startedAt)
-				perf.UnloaderCount++
-			}
-		case "mass-driver":
-			var startedAt time.Time
-			if profileDetails {
-				startedAt = time.Now()
-			}
-			w.stepMassDriverLocked(pos, tile, dt)
-			if profileDetails {
-				perf.MassDrive += time.Since(startedAt)
-				perf.MassDriveCount++
-			}
 		}
+	}
+	if profileDetails && perf.Duct == 0 {
+		perf.Duct = time.Since(ductStartedAt)
+	}
+	var routerStartedAt time.Time
+	if profileDetails {
+		routerStartedAt = time.Now()
+	}
+	for _, pos := range w.itemRouterTilePositions {
+		if pos < 0 || int(pos) >= len(w.model.Tiles) {
+			continue
+		}
+		tile := &w.model.Tiles[pos]
+		if tile.Build == nil || tile.Block == 0 {
+			continue
+		}
+		switch w.blockNameByID(int16(tile.Block)) {
+		case "router", "distributor":
+			w.stepRouterLocked(pos, tile, 8, dt)
+		case "surge-router":
+			w.stepStackRouterLocked(pos, tile, 6, dt)
+		}
+	}
+	if profileDetails {
+		perf.Router += time.Since(routerStartedAt)
+		perf.RouterCount += len(w.itemRouterTilePositions)
+	}
+	var bridgeStartedAt time.Time
+	if profileDetails {
+		bridgeStartedAt = time.Now()
+	}
+	for _, pos := range w.itemBridgeTilePositions {
+		if pos < 0 || int(pos) >= len(w.model.Tiles) {
+			continue
+		}
+		tile := &w.model.Tiles[pos]
+		if tile.Build == nil || tile.Block == 0 {
+			continue
+		}
+		switch w.blockNameByID(int16(tile.Block)) {
+		case "bridge-conveyor":
+			w.stepBridgeConveyorLocked(pos, tile, 11, dt)
+		case "phase-conveyor":
+			w.stepPhaseConveyorLocked(pos, tile, dt)
+		}
+	}
+	if profileDetails {
+		perf.Bridge += time.Since(bridgeStartedAt)
+		perf.BridgeCount += len(w.itemBridgeTilePositions)
+	}
+	var unloaderStartedAt time.Time
+	if profileDetails {
+		unloaderStartedAt = time.Now()
+	}
+	for _, pos := range w.itemUnloaderTilePositions {
+		if pos < 0 || int(pos) >= len(w.model.Tiles) {
+			continue
+		}
+		tile := &w.model.Tiles[pos]
+		if tile.Build == nil || tile.Block == 0 {
+			continue
+		}
+		w.stepUnloaderLocked(pos, tile, dt)
+	}
+	if profileDetails {
+		perf.Unloader += time.Since(unloaderStartedAt)
+		perf.UnloaderCount += len(w.itemUnloaderTilePositions)
+	}
+	var massDriverStartedAt time.Time
+	if profileDetails {
+		massDriverStartedAt = time.Now()
+	}
+	for _, pos := range w.itemMassDriverTilePositions {
+		if pos < 0 || int(pos) >= len(w.model.Tiles) {
+			continue
+		}
+		tile := &w.model.Tiles[pos]
+		if tile.Build == nil || tile.Block == 0 {
+			continue
+		}
+		w.stepMassDriverLocked(pos, tile, dt)
+	}
+	if profileDetails {
+		perf.MassDrive += time.Since(massDriverStartedAt)
+		perf.MassDriveCount += len(w.itemMassDriverTilePositions)
 	}
 	var massShotStartedAt time.Time
 	if profileDetails {
@@ -4096,9 +4238,7 @@ func (w *World) stepItemLogistics(delta time.Duration, profileDetails bool) item
 	w.stepMassDriverShotsLocked(dt)
 	if profileDetails {
 		perf.MassDrive += time.Since(massShotStartedAt)
-		if len(w.massDriverShots) > 0 {
-			perf.MassDriveCount += len(w.massDriverShots)
-		}
+		perf.MassDriveCount += len(w.massDriverShots)
 	}
 	return perf
 }
@@ -4395,7 +4535,7 @@ func (w *World) stepPayloadLogistics(delta time.Duration) {
 	if frames <= 0 {
 		return
 	}
-	for _, pos := range w.activeTilePositions {
+	for _, pos := range w.payloadFactoryTilePositions {
 		if pos < 0 || int(pos) >= len(w.model.Tiles) {
 			continue
 		}
@@ -4406,6 +4546,21 @@ func (w *World) stepPayloadLogistics(delta time.Duration) {
 		switch w.blockNameByID(int16(tile.Block)) {
 		case "ground-factory", "air-factory", "naval-factory":
 			w.stepUnitFactoryPayloadLocked(pos, tile, frames)
+		default:
+			if isReconstructorBlockName(w.blockNameByID(int16(tile.Block))) {
+				w.stepReconstructorLocked(pos, tile, frames)
+			}
+		}
+	}
+	for _, pos := range w.payloadTransportTiles {
+		if pos < 0 || int(pos) >= len(w.model.Tiles) {
+			continue
+		}
+		tile := &w.model.Tiles[pos]
+		if tile.Build == nil || tile.Block == 0 {
+			continue
+		}
+		switch w.blockNameByID(int16(tile.Block)) {
 		case "payload-conveyor", "reinforced-payload-conveyor":
 			w.stepPayloadConveyorLocked(pos, tile, payloadMoveTimeByName(w.blockNameByID(int16(tile.Block))), frames)
 		case "payload-router", "reinforced-payload-router":
@@ -4422,10 +4577,6 @@ func (w *World) stepPayloadLogistics(delta time.Duration) {
 			w.stepPayloadLoaderLocked(pos, tile, frames)
 		case "payload-unloader":
 			w.stepPayloadUnloaderLocked(pos, tile, frames)
-		default:
-			if isReconstructorBlockName(w.blockNameByID(int16(tile.Block))) {
-				w.stepReconstructorLocked(pos, tile, frames)
-			}
 		}
 	}
 	w.stepPayloadDriverShotsLocked(frames)
@@ -7359,6 +7510,20 @@ func (w *World) rebuildBlockOccupancyLocked() {
 	w.unloaderLastUsed = map[int64]int{}
 	w.activeTilePositions = w.activeTilePositions[:0]
 	w.itemLogisticsTilePositions = w.itemLogisticsTilePositions[:0]
+	w.itemConveyorTilePositions = w.itemConveyorTilePositions[:0]
+	w.itemDuctTilePositions = w.itemDuctTilePositions[:0]
+	w.itemRouterTilePositions = w.itemRouterTilePositions[:0]
+	w.itemBridgeTilePositions = w.itemBridgeTilePositions[:0]
+	w.itemUnloaderTilePositions = w.itemUnloaderTilePositions[:0]
+	w.itemMassDriverTilePositions = w.itemMassDriverTilePositions[:0]
+	w.sandboxItemSourceTiles = w.sandboxItemSourceTiles[:0]
+	w.sandboxLiquidSourceTiles = w.sandboxLiquidSourceTiles[:0]
+	w.liquidConduitTilePositions = w.liquidConduitTilePositions[:0]
+	w.liquidStorageTilePositions = w.liquidStorageTilePositions[:0]
+	w.liquidBridgeTilePositions = w.liquidBridgeTilePositions[:0]
+	w.payloadFactoryTilePositions = w.payloadFactoryTilePositions[:0]
+	w.payloadTransportTiles = w.payloadTransportTiles[:0]
+	w.reactorTilePositions = w.reactorTilePositions[:0]
 	w.crafterTilePositions = w.crafterTilePositions[:0]
 	w.drillTilePositions = w.drillTilePositions[:0]
 	w.burstDrillTilePositions = w.burstDrillTilePositions[:0]
@@ -7400,6 +7565,20 @@ func (w *World) rebuildActiveTilesLocked() {
 	// For individual building changes, use indexActiveTileLocked/removeActiveTileIndexLocked instead
 	w.activeTilePositions = w.activeTilePositions[:0]
 	w.itemLogisticsTilePositions = w.itemLogisticsTilePositions[:0]
+	w.itemConveyorTilePositions = w.itemConveyorTilePositions[:0]
+	w.itemDuctTilePositions = w.itemDuctTilePositions[:0]
+	w.itemRouterTilePositions = w.itemRouterTilePositions[:0]
+	w.itemBridgeTilePositions = w.itemBridgeTilePositions[:0]
+	w.itemUnloaderTilePositions = w.itemUnloaderTilePositions[:0]
+	w.itemMassDriverTilePositions = w.itemMassDriverTilePositions[:0]
+	w.sandboxItemSourceTiles = w.sandboxItemSourceTiles[:0]
+	w.sandboxLiquidSourceTiles = w.sandboxLiquidSourceTiles[:0]
+	w.liquidConduitTilePositions = w.liquidConduitTilePositions[:0]
+	w.liquidStorageTilePositions = w.liquidStorageTilePositions[:0]
+	w.liquidBridgeTilePositions = w.liquidBridgeTilePositions[:0]
+	w.payloadFactoryTilePositions = w.payloadFactoryTilePositions[:0]
+	w.payloadTransportTiles = w.payloadTransportTiles[:0]
+	w.reactorTilePositions = w.reactorTilePositions[:0]
 	w.crafterTilePositions = w.crafterTilePositions[:0]
 	w.drillTilePositions = w.drillTilePositions[:0]
 	w.burstDrillTilePositions = w.burstDrillTilePositions[:0]
@@ -7434,6 +7613,20 @@ func (w *World) rebuildActiveTilesLocked() {
 	}
 }
 
+func removeIndexedPosAll(slice []int32, pos int32) []int32 {
+	if len(slice) == 0 {
+		return slice
+	}
+	out := slice[:0]
+	for _, existing := range slice {
+		if existing == pos {
+			continue
+		}
+		out = append(out, existing)
+	}
+	return out
+}
+
 // removeActiveTileIndexLocked removes a single tile from all active tile indices
 // This is the incremental version that should be used instead of rebuildActiveTilesLocked
 func (w *World) removeActiveTileIndexLocked(pos int32, tile *Tile) {
@@ -7442,201 +7635,162 @@ func (w *World) removeActiveTileIndexLocked(pos int32, tile *Tile) {
 	}
 
 	// Remove from activeTilePositions
-	for i, p := range w.activeTilePositions {
-		if p == pos {
-			w.activeTilePositions = append(w.activeTilePositions[:i], w.activeTilePositions[i+1:]...)
-			break
-		}
-	}
+	w.activeTilePositions = removeIndexedPosAll(w.activeTilePositions, pos)
 
 	name := w.blockNameByID(int16(tile.Block))
 
 	// Remove from itemLogisticsTilePositions
 	if isItemLogisticsBlockName(name) {
-		for i, p := range w.itemLogisticsTilePositions {
-			if p == pos {
-				w.itemLogisticsTilePositions = append(w.itemLogisticsTilePositions[:i], w.itemLogisticsTilePositions[i+1:]...)
-				break
-			}
-		}
+		w.itemLogisticsTilePositions = removeIndexedPosAll(w.itemLogisticsTilePositions, pos)
+	}
+	if isItemConveyorBlockName(name) {
+		w.itemConveyorTilePositions = removeIndexedPosAll(w.itemConveyorTilePositions, pos)
+	}
+	if isItemDuctBlockName(name) {
+		w.itemDuctTilePositions = removeIndexedPosAll(w.itemDuctTilePositions, pos)
+	}
+	if isItemRouterBlockName(name) {
+		w.itemRouterTilePositions = removeIndexedPosAll(w.itemRouterTilePositions, pos)
+	}
+	if isItemBridgeBlockName(name) {
+		w.itemBridgeTilePositions = removeIndexedPosAll(w.itemBridgeTilePositions, pos)
+	}
+	if isItemUnloaderBlockName(name) {
+		w.itemUnloaderTilePositions = removeIndexedPosAll(w.itemUnloaderTilePositions, pos)
+	}
+	if name == "mass-driver" {
+		w.itemMassDriverTilePositions = removeIndexedPosAll(w.itemMassDriverTilePositions, pos)
+	}
+	if name == "item-source" {
+		w.sandboxItemSourceTiles = removeIndexedPosAll(w.sandboxItemSourceTiles, pos)
+	}
+	if name == "liquid-source" {
+		w.sandboxLiquidSourceTiles = removeIndexedPosAll(w.sandboxLiquidSourceTiles, pos)
+	}
+	if isLiquidConduitBlockName(name) {
+		w.liquidConduitTilePositions = removeIndexedPosAll(w.liquidConduitTilePositions, pos)
+	}
+	if isLiquidStorageBlockName(name) {
+		w.liquidStorageTilePositions = removeIndexedPosAll(w.liquidStorageTilePositions, pos)
+	}
+	if isLiquidBridgeBlockName(name) {
+		w.liquidBridgeTilePositions = removeIndexedPosAll(w.liquidBridgeTilePositions, pos)
+	}
+	if isPayloadFactoryBlockName(name) || isReconstructorBlockName(name) {
+		w.payloadFactoryTilePositions = removeIndexedPosAll(w.payloadFactoryTilePositions, pos)
+	}
+	if isPayloadTransportBlockName(name) {
+		w.payloadTransportTiles = removeIndexedPosAll(w.payloadTransportTiles, pos)
+	}
+	if name == "thorium-reactor" {
+		w.reactorTilePositions = removeIndexedPosAll(w.reactorTilePositions, pos)
 	}
 
 	// Remove from crafterTilePositions
 	if _, ok := crafterProfilesByBlockName[name]; ok {
-		for i, p := range w.crafterTilePositions {
-			if p == pos {
-				w.crafterTilePositions = append(w.crafterTilePositions[:i], w.crafterTilePositions[i+1:]...)
-				break
-			}
-		}
+		w.crafterTilePositions = removeIndexedPosAll(w.crafterTilePositions, pos)
 	} else if _, ok := separatorProfilesByBlockName[name]; ok {
-		for i, p := range w.crafterTilePositions {
-			if p == pos {
-				w.crafterTilePositions = append(w.crafterTilePositions[:i], w.crafterTilePositions[i+1:]...)
-				break
-			}
-		}
+		w.crafterTilePositions = removeIndexedPosAll(w.crafterTilePositions, pos)
 	}
 
 	// Remove from other tile position lists
 	if _, ok := drillProfilesByBlockName[name]; ok {
-		for i, p := range w.drillTilePositions {
-			if p == pos {
-				w.drillTilePositions = append(w.drillTilePositions[:i], w.drillTilePositions[i+1:]...)
-				break
-			}
-		}
+		w.drillTilePositions = removeIndexedPosAll(w.drillTilePositions, pos)
 	}
 
 	if _, ok := burstDrillProfilesByBlockName[name]; ok {
-		for i, p := range w.burstDrillTilePositions {
-			if p == pos {
-				w.burstDrillTilePositions = append(w.burstDrillTilePositions[:i], w.burstDrillTilePositions[i+1:]...)
-				break
-			}
-		}
+		w.burstDrillTilePositions = removeIndexedPosAll(w.burstDrillTilePositions, pos)
 	}
 
 	if _, ok := beamDrillProfilesByBlockName[name]; ok {
-		for i, p := range w.beamDrillTilePositions {
-			if p == pos {
-				w.beamDrillTilePositions = append(w.beamDrillTilePositions[:i], w.beamDrillTilePositions[i+1:]...)
-				break
-			}
-		}
+		w.beamDrillTilePositions = removeIndexedPosAll(w.beamDrillTilePositions, pos)
 	}
 
 	if _, ok := floorPumpProfilesByBlockName[name]; ok {
-		for i, p := range w.pumpTilePositions {
-			if p == pos {
-				w.pumpTilePositions = append(w.pumpTilePositions[:i], w.pumpTilePositions[i+1:]...)
-				break
-			}
-		}
+		w.pumpTilePositions = removeIndexedPosAll(w.pumpTilePositions, pos)
 	} else if _, ok := solidPumpProfilesByBlockName[name]; ok {
-		for i, p := range w.pumpTilePositions {
-			if p == pos {
-				w.pumpTilePositions = append(w.pumpTilePositions[:i], w.pumpTilePositions[i+1:]...)
-				break
-			}
-		}
+		w.pumpTilePositions = removeIndexedPosAll(w.pumpTilePositions, pos)
 	}
 
 	if name == "incinerator" || name == "slag-incinerator" {
-		for i, p := range w.incineratorTilePositions {
-			if p == pos {
-				w.incineratorTilePositions = append(w.incineratorTilePositions[:i], w.incineratorTilePositions[i+1:]...)
-				break
-			}
-		}
+		w.incineratorTilePositions = removeIndexedPosAll(w.incineratorTilePositions, pos)
 	}
 
 	if _, ok := repairTurretProfilesByBlockName[name]; ok {
-		for i, p := range w.repairTurretTilePositions {
-			if p == pos {
-				w.repairTurretTilePositions = append(w.repairTurretTilePositions[:i], w.repairTurretTilePositions[i+1:]...)
-				break
-			}
-		}
+		w.repairTurretTilePositions = removeIndexedPosAll(w.repairTurretTilePositions, pos)
 	}
 
 	if _, ok := repairTowerProfilesByBlockName[name]; ok {
-		for i, p := range w.repairTowerTilePositions {
-			if p == pos {
-				w.repairTowerTilePositions = append(w.repairTowerTilePositions[:i], w.repairTowerTilePositions[i+1:]...)
-				break
-			}
-		}
+		w.repairTowerTilePositions = removeIndexedPosAll(w.repairTowerTilePositions, pos)
 	}
 
 	if _, ok := unitFactoryPlansByBlockName[name]; ok {
-		for i, p := range w.factoryTilePositions {
-			if p == pos {
-				w.factoryTilePositions = append(w.factoryTilePositions[:i], w.factoryTilePositions[i+1:]...)
-				break
-			}
-		}
+		w.factoryTilePositions = removeIndexedPosAll(w.factoryTilePositions, pos)
 	}
 
 	if isHeatConductorBlockName(name) {
-		for i, p := range w.heatConductorTilePositions {
-			if p == pos {
-				w.heatConductorTilePositions = append(w.heatConductorTilePositions[:i], w.heatConductorTilePositions[i+1:]...)
-				break
-			}
-		}
+		w.heatConductorTilePositions = removeIndexedPosAll(w.heatConductorTilePositions, pos)
 	}
 
 	// Remove from turret positions
 	if prof, ok := w.getBuildingWeaponProfile(int16(tile.Block)); ok && prof.Damage > 0 && prof.Interval > 0 && prof.Range > 0 {
-		for i, p := range w.turretTilePositions {
-			if p == pos {
-				w.turretTilePositions = append(w.turretTilePositions[:i], w.turretTilePositions[i+1:]...)
-				break
-			}
-		}
+		w.turretTilePositions = removeIndexedPosAll(w.turretTilePositions, pos)
 	}
 
 	// Remove from support building positions
 	if _, ok := mendProjectorProfiles[name]; ok {
-		for i, p := range w.mendProjectorPositions {
-			if p == pos {
-				w.mendProjectorPositions = append(w.mendProjectorPositions[:i], w.mendProjectorPositions[i+1:]...)
-				break
-			}
-		}
+		w.mendProjectorPositions = removeIndexedPosAll(w.mendProjectorPositions, pos)
 	}
 
 	if _, ok := overdriveProjectorProfiles[name]; ok {
-		for i, p := range w.overdriveProjectorPositions {
-			if p == pos {
-				w.overdriveProjectorPositions = append(w.overdriveProjectorPositions[:i], w.overdriveProjectorPositions[i+1:]...)
-				break
-			}
-		}
+		w.overdriveProjectorPositions = removeIndexedPosAll(w.overdriveProjectorPositions, pos)
 	}
 
 	if _, ok := forceProjectorProfiles[name]; ok {
-		for i, p := range w.forceProjectorPositions {
-			if p == pos {
-				w.forceProjectorPositions = append(w.forceProjectorPositions[:i], w.forceProjectorPositions[i+1:]...)
-				break
+		w.forceProjectorPositions = removeIndexedPosAll(w.forceProjectorPositions, pos)
+	}
+
+	if w.isPowerRelevantBuildingLocked(tile) {
+		w.powerTilePositions = removeIndexedPosAll(w.powerTilePositions, pos)
+		if isPowerNodeBlockName(name) {
+			team := tile.Team
+			if tile.Build != nil && tile.Build.Team != 0 {
+				team = tile.Build.Team
 			}
+			if team != 0 {
+				w.teamPowerNodeTiles[team] = removeIndexedPosAll(w.teamPowerNodeTiles[team], pos)
+			}
+		}
+		if name == "diode" {
+			w.powerDiodeTilePositions = removeIndexedPosAll(w.powerDiodeTilePositions, pos)
+		}
+		if name == "power-void" {
+			w.powerVoidTilePositions = removeIndexedPosAll(w.powerVoidTilePositions, pos)
 		}
 	}
 
 	// Remove from team building tiles
-	if tile.Build != nil {
-		team := tile.Build.Team
-		if team == 0 {
-			team = tile.Team
+	team := tile.Team
+	if tile.Build != nil && tile.Build.Team != 0 {
+		team = tile.Build.Team
+	}
+	if team != 0 {
+		w.teamBuildingTiles[team] = removeIndexedPosAll(w.teamBuildingTiles[team], pos)
+		if w.isPowerRelevantBuildingLocked(tile) {
+			w.teamPowerTiles[team] = removeIndexedPosAll(w.teamPowerTiles[team], pos)
+			if isPowerNodeBlockName(name) {
+				w.teamPowerNodeTiles[team] = removeIndexedPosAll(w.teamPowerNodeTiles[team], pos)
+			}
 		}
-		if team != 0 {
-			if tiles, ok := w.teamBuildingTiles[team]; ok {
-				for i, p := range tiles {
-					if p == pos {
-						w.teamBuildingTiles[team] = append(tiles[:i], tiles[i+1:]...)
-						break
-					}
-				}
-			}
 
-			// Remove from spatial index
-			if idx, ok := w.teamBuildingSpatial[team]; ok {
-				idx.remove(tile.X, tile.Y, pos)
-			}
+		// Remove from spatial index
+		if idx, ok := w.teamBuildingSpatial[team]; ok {
+			idx.remove(tile.X, tile.Y, pos)
+		}
 
-			// Remove from core tiles
-			if isCoreBlockName(name) {
-				if cores, ok := w.teamCoreTiles[team]; ok {
-					for i, p := range cores {
-						if p == pos {
-							w.teamCoreTiles[team] = append(cores[:i], cores[i+1:]...)
-							break
-						}
-					}
-				}
-			}
+		// Remove from core tiles
+		if isCoreBlockName(name) {
+			w.teamCoreTiles[team] = removeIndexedPosAll(w.teamCoreTiles[team], pos)
 		}
 	}
 }
@@ -7649,6 +7803,48 @@ func (w *World) indexActiveTileLocked(pos int32, tile *Tile) {
 	name := w.blockNameByID(int16(tile.Block))
 	if isItemLogisticsBlockName(name) {
 		w.itemLogisticsTilePositions = append(w.itemLogisticsTilePositions, pos)
+	}
+	if isItemConveyorBlockName(name) {
+		w.itemConveyorTilePositions = append(w.itemConveyorTilePositions, pos)
+	}
+	if isItemDuctBlockName(name) {
+		w.itemDuctTilePositions = append(w.itemDuctTilePositions, pos)
+	}
+	if isItemRouterBlockName(name) {
+		w.itemRouterTilePositions = append(w.itemRouterTilePositions, pos)
+	}
+	if isItemBridgeBlockName(name) {
+		w.itemBridgeTilePositions = append(w.itemBridgeTilePositions, pos)
+	}
+	if isItemUnloaderBlockName(name) {
+		w.itemUnloaderTilePositions = append(w.itemUnloaderTilePositions, pos)
+	}
+	if name == "mass-driver" {
+		w.itemMassDriverTilePositions = append(w.itemMassDriverTilePositions, pos)
+	}
+	if name == "item-source" {
+		w.sandboxItemSourceTiles = append(w.sandboxItemSourceTiles, pos)
+	}
+	if name == "liquid-source" {
+		w.sandboxLiquidSourceTiles = append(w.sandboxLiquidSourceTiles, pos)
+	}
+	if isLiquidConduitBlockName(name) {
+		w.liquidConduitTilePositions = append(w.liquidConduitTilePositions, pos)
+	}
+	if isLiquidStorageBlockName(name) {
+		w.liquidStorageTilePositions = append(w.liquidStorageTilePositions, pos)
+	}
+	if isLiquidBridgeBlockName(name) {
+		w.liquidBridgeTilePositions = append(w.liquidBridgeTilePositions, pos)
+	}
+	if isPayloadFactoryBlockName(name) || isReconstructorBlockName(name) {
+		w.payloadFactoryTilePositions = append(w.payloadFactoryTilePositions, pos)
+	}
+	if isPayloadTransportBlockName(name) {
+		w.payloadTransportTiles = append(w.payloadTransportTiles, pos)
+	}
+	if name == "thorium-reactor" {
+		w.reactorTilePositions = append(w.reactorTilePositions, pos)
 	}
 	if _, ok := crafterProfilesByBlockName[name]; ok {
 		w.crafterTilePositions = append(w.crafterTilePositions, pos)
@@ -8014,6 +8210,20 @@ func (w *World) SetModel(m *WorldModel) {
 	w.blockOccupancy = map[int32]int32{}
 	w.activeTilePositions = nil
 	w.itemLogisticsTilePositions = nil
+	w.itemConveyorTilePositions = nil
+	w.itemDuctTilePositions = nil
+	w.itemRouterTilePositions = nil
+	w.itemBridgeTilePositions = nil
+	w.itemUnloaderTilePositions = nil
+	w.itemMassDriverTilePositions = nil
+	w.sandboxItemSourceTiles = nil
+	w.sandboxLiquidSourceTiles = nil
+	w.liquidConduitTilePositions = nil
+	w.liquidStorageTilePositions = nil
+	w.liquidBridgeTilePositions = nil
+	w.payloadFactoryTilePositions = nil
+	w.payloadTransportTiles = nil
+	w.reactorTilePositions = nil
 	w.crafterTilePositions = nil
 	w.drillTilePositions = nil
 	w.burstDrillTilePositions = nil
@@ -9010,6 +9220,18 @@ func (w *World) Model() *WorldModel {
 	return w.model
 }
 
+func (w *World) Bounds() (int, int, bool) {
+	if w == nil {
+		return 0, 0, false
+	}
+	w.mu.RLock()
+	defer w.mu.RUnlock()
+	if w.model == nil || w.model.Width <= 0 || w.model.Height <= 0 {
+		return 0, 0, false
+	}
+	return w.model.Width, w.model.Height, true
+}
+
 func (w *World) CloneModel() *WorldModel {
 	w.mu.RLock()
 	defer w.mu.RUnlock()
@@ -9017,6 +9239,15 @@ func (w *World) CloneModel() *WorldModel {
 		return nil
 	}
 	return w.model.Clone()
+}
+
+func (w *World) BlockNameByID(blockID int16) string {
+	if w == nil {
+		return ""
+	}
+	w.mu.RLock()
+	defer w.mu.RUnlock()
+	return w.blockNameByID(blockID)
 }
 
 func (w *World) AddEntity(typeID int16, x, y float32, team TeamID) (RawEntity, error) {
@@ -9738,6 +9969,7 @@ func (w *World) placeCompletedBuildingLocked(pos int32, tile *Tile, team TeamID,
 		return result
 	}
 	prevBlockName := w.blockNameByID(int16(tile.Block))
+	prevPowerRelevant := w.isPowerRelevantBuildingLocked(tile)
 
 	prevItems := []ItemStack(nil)
 	prevLiquids := []LiquidStack(nil)
@@ -9762,6 +9994,11 @@ func (w *World) placeCompletedBuildingLocked(pos int32, tile *Tile, team TeamID,
 		}
 	}
 
+	if prevPowerRelevant {
+		w.clearPowerLinksForBuildingLocked(pos)
+	}
+	w.removeActiveTileIndexLocked(pos, tile)
+	w.setBuildingOccupancyLocked(pos, tile, false)
 	w.clearBuildingRuntimeLocked(pos)
 
 	tile.Block = BlockID(blockID)
@@ -9789,7 +10026,7 @@ func (w *World) placeCompletedBuildingLocked(pos int32, tile *Tile, team TeamID,
 		}
 	}
 
-	if w.isPowerRelevantBuildingLocked(tile) {
+	if prevPowerRelevant || w.isPowerRelevantBuildingLocked(tile) {
 		w.invalidatePowerNetsLocked()
 	}
 	w.setBuildingOccupancyLocked(pos, tile, true)
@@ -12099,12 +12336,12 @@ func (idx *buildingSpatialIndex) remove(tileX, tileY int, pos int32) {
 	cy := tileY * 8 / idx.cellSize
 	key := packSpatialCell(cx, cy)
 	if cell, ok := idx.cells[key]; ok {
-		for i, p := range cell {
-			if p == pos {
-				idx.cells[key] = append(cell[:i], cell[i+1:]...)
-				break
-			}
+		cell = removeIndexedPosAll(cell, pos)
+		if len(cell) == 0 {
+			delete(idx.cells, key)
+			return
 		}
+		idx.cells[key] = cell
 	}
 }
 

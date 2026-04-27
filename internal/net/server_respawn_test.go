@@ -235,6 +235,101 @@ func TestHandleOfficialUnitClearRespawnsAliveCoreUnit(t *testing.T) {
 	<-done
 }
 
+func TestInitialConnectAndDeathTimerRespawnAreSingleFlight(t *testing.T) {
+	srv := NewServer("127.0.0.1:0", 157)
+	srv.Content.RegisterUnitType(testUnitType{id: 35, name: "alpha"})
+	srv.PlayerUnitTypeFn = func() int16 { return 35 }
+	srv.SetSnapshotIntervals(250, 250)
+	srv.SpawnTileFn = func() (protocol.Point2, bool) {
+		return protocol.Point2{X: 4, Y: 6}, true
+	}
+
+	serverSide, clientSide := net.Pipe()
+	defer clientSide.Close()
+
+	conn := NewConn(serverSide, srv.Serial)
+	defer conn.Close()
+	conn.playerID = 120
+	conn.teamID = 1
+	conn.hasConnected = true
+	conn.dead = true
+
+	var spawnCalls atomic.Int32
+	spawnStarted := make(chan struct{}, 1)
+	releaseSpawn := make(chan struct{})
+	srv.SpawnUnitFn = func(_ *Conn, unitID int32, pos protocol.Point2, unitType int16) (float32, float32, bool) {
+		if pos.X != 4 || pos.Y != 6 {
+			t.Fatalf("unexpected spawn tile %+v", pos)
+		}
+		if unitType != 35 {
+			t.Fatalf("expected respawn unit type 35, got %d", unitType)
+		}
+		spawnCalls.Add(1)
+		select {
+		case spawnStarted <- struct{}{}:
+		default:
+		}
+		<-releaseSpawn
+		return 64, 96, true
+	}
+
+	var spawnPackets atomic.Int32
+	conn.onSend = func(obj any, _ int, _ int, _ int) {
+		if _, ok := obj.(*protocol.Remote_CoreBlock_playerSpawn_149); ok {
+			spawnPackets.Add(1)
+		}
+	}
+
+	done := make(chan struct{})
+	go func() {
+		_, _ = io.Copy(io.Discard, clientSide)
+		close(done)
+	}()
+
+	srv.scheduleInitialConnectRespawn(conn)
+	go srv.handleDeathTimerRespawn(conn)
+
+	select {
+	case <-spawnStarted:
+	case <-time.After(200 * time.Millisecond):
+		t.Fatal("expected first respawn chain to begin spawning")
+	}
+
+	time.Sleep(srv.initialConnectRespawnDelay() + 150*time.Millisecond)
+	if got := spawnCalls.Load(); got != 1 {
+		t.Fatalf("expected overlapping respawn chains to enter world spawn once before release, got %d", got)
+	}
+
+	close(releaseSpawn)
+
+	deadline := time.Now().Add(300 * time.Millisecond)
+	for time.Now().Before(deadline) {
+		if !conn.dead && spawnPackets.Load() == 1 {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+
+	if got := spawnCalls.Load(); got != 1 {
+		t.Fatalf("expected single-flight respawn to spawn exactly one unit, got %d", got)
+	}
+	if got := spawnPackets.Load(); got != 1 {
+		t.Fatalf("expected single-flight respawn to send exactly one playerSpawn packet, got %d", got)
+	}
+	if conn.dead {
+		t.Fatal("expected respawn chain to finish with an alive player")
+	}
+	if conn.unitID == 0 {
+		t.Fatal("expected respawn chain to leave a bound unit")
+	}
+	if conn.respawnChainInProgress() {
+		t.Fatal("expected respawn single-flight guard to clear after completion")
+	}
+
+	_ = conn.Close()
+	<-done
+}
+
 func TestSpawnRespawnUnitDoesNotCreateMirrorWhenWorldSpawnFails(t *testing.T) {
 	srv := NewServer("127.0.0.1:0", 157)
 	srv.Content.RegisterUnitType(testUnitType{id: 35, name: "alpha"})
@@ -724,6 +819,44 @@ func TestClientDeadWorldMissingDuringRespawnWindowIsIgnored(t *testing.T) {
 	}
 	if age := time.Since(conn.lastRespawnReq); age < 0 || age > 2*time.Second {
 		t.Fatalf("expected ignored dead echo not to overwrite respawn timing, got age=%s", age)
+	}
+}
+
+func TestClientDeadWorldMissingDuringLiveWorldLoadSettleWindowIsIgnored(t *testing.T) {
+	srv := NewServer("127.0.0.1:0", 157)
+	now := time.Now()
+	conn := &Conn{
+		playerID:     3220,
+		unitID:       32200,
+		teamID:       1,
+		hasConnected: true,
+		connectTime:  now.Add(-5 * time.Second),
+		lastSpawnAt:  now.Add(-4 * time.Second),
+	}
+	conn.SetLiveWorldStream(true)
+	srv.UnitInfoFn = func(unitID int32) (UnitInfo, bool) {
+		if unitID != conn.unitID {
+			return UnitInfo{}, false
+		}
+		return UnitInfo{}, false
+	}
+
+	srv.handlePacket(conn, &protocol.Remote_NetServer_clientSnapshot_48{
+		SnapshotID: 21,
+		UnitID:     conn.unitID,
+		Dead:       true,
+		X:          88,
+		Y:          120,
+	}, false)
+
+	if conn.dead {
+		t.Fatal("expected live-world load settle window to ignore world-missing dead echo")
+	}
+	if conn.unitID != 32200 {
+		t.Fatalf("expected live-world settle window to keep unit binding, got %d", conn.unitID)
+	}
+	if !conn.lastSpawnRepairAt.IsZero() {
+		t.Fatalf("expected world-missing settle-window ignore to avoid repair spam, got repairAt=%v", conn.lastSpawnRepairAt)
 	}
 }
 

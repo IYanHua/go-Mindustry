@@ -11,10 +11,19 @@ import (
 	"time"
 )
 
-func waitForIPCConn(t *testing.T, endpoint string) net.Conn {
+func waitForIPCConn(t *testing.T, endpoint string, done <-chan error) net.Conn {
 	t.Helper()
 	var lastErr error
-	for attempt := 0; attempt < 40; attempt++ {
+	deadline := time.Now().Add(10 * time.Second)
+	for time.Now().Before(deadline) {
+		select {
+		case err := <-done:
+			if err != nil {
+				t.Fatalf("child core exited before ipc listener was ready: %v", err)
+			}
+			t.Fatalf("child core exited before ipc listener was ready")
+		default:
+		}
 		conn, err := dialIPC(endpoint, 250*time.Millisecond)
 		if err == nil {
 			return conn
@@ -22,7 +31,15 @@ func waitForIPCConn(t *testing.T, endpoint string) net.Conn {
 		lastErr = err
 		time.Sleep(50 * time.Millisecond)
 	}
-	t.Fatalf("dial %s failed: %v", endpoint, lastErr)
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("dial %s failed: %v (child exited: %v)", endpoint, lastErr, err)
+		}
+		t.Fatalf("dial %s failed: %v (child exited before listener became ready)", endpoint, lastErr)
+	default:
+	}
+	t.Fatalf("dial %s failed after waiting for listener readiness: %v", endpoint, lastErr)
 	return nil
 }
 
@@ -41,7 +58,7 @@ func TestRemoteCore3WorldCacheRoundTrip(t *testing.T) {
 		done <- RunChildCore("core3", endpoint, 0)
 	}()
 
-	conn := waitForIPCConn(t, endpoint)
+	conn := waitForIPCConn(t, endpoint, done)
 	defer conn.Close()
 
 	c3 := NewCore3(Config{Name: "remote-core3"})
@@ -77,7 +94,7 @@ func TestRemoteCore4PolicyRoundTrip(t *testing.T) {
 		done <- RunChildCore("core4", endpoint, 0)
 	}()
 
-	conn := waitForIPCConn(t, endpoint)
+	conn := waitForIPCConn(t, endpoint, done)
 	defer conn.Close()
 
 	c4 := NewCore4(Config{Name: "remote-core4"})

@@ -301,6 +301,174 @@ func TestClientSnapshotIDWraparoundRejectsOlderWrappedValue(t *testing.T) {
 	<-done
 }
 
+func TestClientSnapshotDefaultAcceptsLargePositionDelta(t *testing.T) {
+	srv := NewServer("127.0.0.1:0", 157)
+
+	serverSide, clientSide := net.Pipe()
+	defer clientSide.Close()
+
+	conn := NewConn(serverSide, srv.Serial)
+	defer conn.Close()
+	conn.playerID = 51
+	conn.unitID = 5100
+	conn.teamID = 1
+	conn.hasConnected = true
+	conn.snapX = 64
+	conn.snapY = 96
+
+	var setPositionPackets atomic.Int32
+	conn.onSend = func(obj any, _ int, _ int, _ int) {
+		if _, ok := obj.(*protocol.Remote_NetClient_setPosition_29); ok {
+			setPositionPackets.Add(1)
+		}
+	}
+
+	done := make(chan struct{})
+	go func() {
+		_, _ = io.Copy(io.Discard, clientSide)
+		close(done)
+	}()
+
+	var motionCalls atomic.Int32
+	var positionCalls atomic.Int32
+	var gotVX, gotVY float32
+	var gotX, gotY, gotRot float32
+	srv.SetUnitMotionFn = func(unitID int32, vx, vy, rotVel float32) bool {
+		if unitID != conn.unitID {
+			t.Fatalf("expected motion update for unit %d, got %d", conn.unitID, unitID)
+		}
+		motionCalls.Add(1)
+		gotVX, gotVY = vx, vy
+		return true
+	}
+	srv.SetUnitPositionFn = func(unitID int32, x, y, rotation float32) bool {
+		if unitID != conn.unitID {
+			t.Fatalf("expected position update for unit %d, got %d", conn.unitID, unitID)
+		}
+		positionCalls.Add(1)
+		gotX, gotY, gotRot = x, y, rotation
+		return true
+	}
+
+	srv.handlePacket(conn, &protocol.Remote_NetServer_clientSnapshot_48{
+		SnapshotID: 1,
+		UnitID:     conn.unitID,
+		Dead:       false,
+		X:          1825.686,
+		Y:          1488.5273,
+		Rotation:   225,
+		XVelocity:  -2.510229,
+		YVelocity:  -2.510229,
+	}, true)
+
+	time.Sleep(50 * time.Millisecond)
+
+	if setPositionPackets.Load() != 0 {
+		t.Fatalf("expected default clientSnapshot path not to force-correct position, got %d setPosition packets", setPositionPackets.Load())
+	}
+	if motionCalls.Load() != 1 {
+		t.Fatalf("expected one motion update, got %d", motionCalls.Load())
+	}
+	if positionCalls.Load() != 1 {
+		t.Fatalf("expected one position update, got %d", positionCalls.Load())
+	}
+	if gotVX != -2.510229 || gotVY != -2.510229 {
+		t.Fatalf("unexpected motion update: vx=%.6f vy=%.6f", gotVX, gotVY)
+	}
+	if gotX != 1825.686 || gotY != 1488.5273 || gotRot != 225 {
+		t.Fatalf("unexpected position update: x=%.4f y=%.4f rot=%.1f", gotX, gotY, gotRot)
+	}
+	if conn.snapX != 1825.686 || conn.snapY != 1488.5273 {
+		t.Fatalf("expected conn snapshot position to follow client, got (%.4f, %.4f)", conn.snapX, conn.snapY)
+	}
+
+	_ = conn.Close()
+	<-done
+}
+
+func TestClientSnapshotStrictVerificationCorrectsLargePositionDelta(t *testing.T) {
+	srv := NewServer("127.0.0.1:0", 157)
+	srv.SetClientPositionVerificationEnabled(true)
+
+	serverSide, clientSide := net.Pipe()
+	defer clientSide.Close()
+
+	conn := NewConn(serverSide, srv.Serial)
+	defer conn.Close()
+	conn.playerID = 52
+	conn.unitID = 5200
+	conn.teamID = 1
+	conn.hasConnected = true
+	conn.snapX = 64
+	conn.snapY = 96
+
+	srv.UnitInfoFn = func(unitID int32) (UnitInfo, bool) {
+		if unitID != conn.unitID {
+			return UnitInfo{}, false
+		}
+		return UnitInfo{
+			ID:     unitID,
+			X:      64,
+			Y:      96,
+			Health: 100,
+			TeamID: 1,
+		}, true
+	}
+
+	var setPositionPackets atomic.Int32
+	conn.onSend = func(obj any, _ int, _ int, _ int) {
+		if _, ok := obj.(*protocol.Remote_NetClient_setPosition_29); ok {
+			setPositionPackets.Add(1)
+		}
+	}
+
+	done := make(chan struct{})
+	go func() {
+		_, _ = io.Copy(io.Discard, clientSide)
+		close(done)
+	}()
+
+	var motionCalls atomic.Int32
+	var positionCalls atomic.Int32
+	srv.SetUnitMotionFn = func(unitID int32, vx, vy, rotVel float32) bool {
+		motionCalls.Add(1)
+		return true
+	}
+	srv.SetUnitPositionFn = func(unitID int32, x, y, rotation float32) bool {
+		positionCalls.Add(1)
+		return true
+	}
+
+	srv.handlePacket(conn, &protocol.Remote_NetServer_clientSnapshot_48{
+		SnapshotID: 1,
+		UnitID:     conn.unitID,
+		Dead:       false,
+		X:          1825.686,
+		Y:          1488.5273,
+		Rotation:   225,
+		XVelocity:  -2.510229,
+		YVelocity:  -2.510229,
+	}, true)
+
+	time.Sleep(50 * time.Millisecond)
+
+	if setPositionPackets.Load() != 1 {
+		t.Fatalf("expected strict verification to send one correction packet, got %d", setPositionPackets.Load())
+	}
+	if motionCalls.Load() != 0 {
+		t.Fatalf("expected strict correction path not to apply motion update, got %d", motionCalls.Load())
+	}
+	if positionCalls.Load() != 0 {
+		t.Fatalf("expected strict correction path not to apply direct position update, got %d", positionCalls.Load())
+	}
+	if conn.snapX != 64 || conn.snapY != 96 {
+		t.Fatalf("expected strict correction to keep authoritative position, got (%.4f, %.4f)", conn.snapX, conn.snapY)
+	}
+
+	_ = conn.Close()
+	<-done
+}
+
 func TestPostConnectLoopUsesSingleSyncTimeForStateAndEntitySnapshots(t *testing.T) {
 	srv := NewServer("127.0.0.1:0", 157)
 	srv.Content.RegisterUnitType(testUnitType{id: 35, name: "alpha"})

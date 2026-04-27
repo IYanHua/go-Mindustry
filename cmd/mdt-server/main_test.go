@@ -312,19 +312,9 @@ func buildTestMSAV(t *testing.T, version int32) []byte {
 }
 
 func TestLoadWorldStreamAcceptsLegacyMSAVVersion(t *testing.T) {
-	path := testRepoPath(t, filepath.Join("assets", "worlds", "maps", "erekir", "ravine.msav"))
-	if _, err := os.Stat(path); err != nil {
-		if os.IsNotExist(err) {
-			t.Skip("legacy ravine map not present in workspace")
-		}
-		t.Fatalf("stat legacy map failed: %v", err)
-	}
-	ver, err := worldstream.ReadMSAVVersion(path)
-	if err != nil {
-		t.Fatalf("read legacy msav version: %v", err)
-	}
-	if ver >= 11 {
-		t.Fatalf("expected a legacy save version (<11), got %d", ver)
+	path := filepath.Join(t.TempDir(), "legacy.msav")
+	if err := os.WriteFile(path, buildTestMSAV(t, 5), 0o600); err != nil {
+		t.Fatalf("write legacy msav failed: %v", err)
 	}
 
 	payload, err := loadWorldStream(path, nil)
@@ -393,6 +383,71 @@ func TestBuildInitialWorldDataPayloadPrefersLiveModelSnapshotForInitialJoin(t *t
 	}
 }
 
+func TestBuildInitialWorldDataPayloadPrefersLiveModelSnapshotWithBundledMap(t *testing.T) {
+	path := filepath.Join("assets", "worlds", "file.msav")
+	if _, err := os.Stat(path); err != nil {
+		if os.IsNotExist(err) {
+			t.Skip("bundled file.msav not present in workspace")
+		}
+		t.Fatalf("stat bundled file.msav failed: %v", err)
+	}
+
+	baseModel, err := worldstream.LoadWorldModelFromMSAV(path, nil)
+	if err != nil {
+		t.Fatalf("load bundled world model: %v", err)
+	}
+	liveModelBase := baseModel.Clone()
+	nodePos := placeSyncTestBuilding(t, liveModelBase, 8, 10, 422, 1, 0)
+	targetPos := placeSyncTestBuilding(t, liveModelBase, 14, 10, 421, 1, 0)
+
+	w := world.New(world.Config{TPS: 60})
+	w.SetModel(liveModelBase)
+	w.ConfigureBuildingPacked(nodePos, targetPos)
+
+	liveModel := w.CloneModelForWorldStream()
+	if liveModel == nil {
+		t.Fatal("expected live model clone")
+	}
+	expectedPayload, err := worldstream.BuildWorldStreamFromModelSnapshot(liveModel, 1, w.Snapshot())
+	if err != nil {
+		t.Fatalf("build expected live world payload: %v", err)
+	}
+	expectedPayload, err = worldstream.RewriteRulesInWorldStream(expectedPayload, buildRuntimeRulesRaw(w, path))
+	if err != nil {
+		t.Fatalf("rewrite expected live rules: %v", err)
+	}
+
+	cache := &worldCache{}
+	basePayload, err := cache.get(path)
+	if err != nil {
+		t.Fatalf("cache get base payload: %v", err)
+	}
+	srv := netserver.NewServer("127.0.0.1:0", 157)
+	serverSide, clientSide := net.Pipe()
+	defer serverSide.Close()
+	defer clientSide.Close()
+
+	conn := netserver.NewConn(serverSide, srv.Serial)
+	defer conn.Close()
+
+	payload, err := buildInitialWorldDataPayload(conn, w, cache, path)
+	if err != nil {
+		t.Fatalf("build initial world payload: %v", err)
+	}
+	if len(payload) == 0 {
+		t.Fatal("expected non-empty initial world payload")
+	}
+	if !conn.UsesLiveWorldStream() {
+		t.Fatal("expected bundled-map initial join to enable live world stream mode")
+	}
+	if bytes.Equal(payload, basePayload) {
+		t.Fatal("expected initial world payload to prefer live world snapshot over cached base worldstream")
+	}
+	if !bytes.Equal(payload, expectedPayload) {
+		t.Fatal("expected initial world payload to match live world snapshot bytes")
+	}
+}
+
 func TestBuildInitialWorldDataPayloadFallsBackToBaseWorldStreamWithoutWorld(t *testing.T) {
 	path := filepath.Join("assets", "worlds", "maps", "erekir", "origin.msav")
 	if _, err := os.Stat(path); err != nil {
@@ -430,18 +485,68 @@ func TestBuildInitialWorldDataPayloadFallsBackToBaseWorldStreamWithoutWorld(t *t
 	}
 }
 
-func testRepoPath(t *testing.T, rel string) string {
-	t.Helper()
-	candidates := []string{
-		rel,
-		filepath.Join("..", "..", rel),
+func TestWorldCacheModelUsesWorldStreamPayloadBaseline(t *testing.T) {
+	path := filepath.Join("assets", "worlds", "maps", "serpulo", "hidden", "55.msav")
+	if _, err := os.Stat(path); err != nil {
+		if os.IsNotExist(err) {
+			t.Skip("hidden 55 map not present in workspace")
+		}
+		t.Fatalf("stat hidden 55 map failed: %v", err)
 	}
-	for _, candidate := range candidates {
-		if st, err := os.Stat(candidate); err == nil && !st.IsDir() {
-			return candidate
+
+	payload, err := worldstream.BuildWorldStreamFromMSAV(path)
+	if err != nil {
+		t.Fatalf("build base world stream: %v", err)
+	}
+	wantModel, err := worldstream.LoadWorldModelFromWorldStreamPayload(payload, nil)
+	if err != nil {
+		t.Fatalf("decode baseline model from world stream: %v", err)
+	}
+	msavModel, err := worldstream.LoadWorldModelFromMSAV(path, nil)
+	if err != nil {
+		t.Fatalf("decode msav model: %v", err)
+	}
+
+	mismatch := -1
+	for i := range wantModel.Tiles {
+		wantTile := wantModel.Tiles[i]
+		gotTile := msavModel.Tiles[i]
+		if wantTile.Block != gotTile.Block ||
+			wantTile.Team != gotTile.Team ||
+			wantTile.Rotation != gotTile.Rotation ||
+			(wantTile.Build != nil) != (gotTile.Build != nil) {
+			mismatch = i
+			break
 		}
 	}
-	return rel
+	if mismatch < 0 {
+		t.Skip("world stream baseline matches decoded msav model in this workspace")
+	}
+
+	cache := &worldCache{}
+	if _, err := cache.get(path); err != nil {
+		t.Fatalf("cache get baseline payload: %v", err)
+	}
+	gotModel := cache.model(path)
+	if gotModel == nil {
+		t.Fatal("expected cached baseline model")
+	}
+	if mismatch >= len(gotModel.Tiles) {
+		t.Fatalf("cached model too small for mismatch index %d", mismatch)
+	}
+
+	wantTile := wantModel.Tiles[mismatch]
+	gotTile := gotModel.Tiles[mismatch]
+	if gotTile.Block != wantTile.Block ||
+		gotTile.Team != wantTile.Team ||
+		gotTile.Rotation != wantTile.Rotation ||
+		(gotTile.Build != nil) != (wantTile.Build != nil) {
+		t.Fatalf("expected cached baseline tile %d to match world stream payload (block=%d team=%d rot=%d build=%v), got block=%d team=%d rot=%d build=%v",
+			mismatch,
+			wantTile.Block, wantTile.Team, wantTile.Rotation, wantTile.Build != nil,
+			gotTile.Block, gotTile.Team, gotTile.Rotation, gotTile.Build != nil,
+		)
+	}
 }
 
 func TestBuilderSnapshotActiveTreatsQueuedPlansAsActive(t *testing.T) {
@@ -782,6 +887,93 @@ func TestSyncWorldDiffToConnFinishesConstructTileBeforeSetTile(t *testing.T) {
 	}
 }
 
+func TestSyncWorldDiffToConnAirToBuildingEmitsConstructFinishBeforeSetTile(t *testing.T) {
+	srv := netserver.NewServer("127.0.0.1:0", 157)
+	serverSide, clientSide := net.Pipe()
+	defer serverSide.Close()
+	defer clientSide.Close()
+
+	sendConn := netserver.NewConn(serverSide, srv.Serial)
+	defer sendConn.Close()
+
+	w := world.New(world.Config{TPS: 60})
+	liveModel := world.NewWorldModel(16, 16)
+	liveModel.BlockNames = map[int16]string{
+		345: "container",
+	}
+	targetPos := placeSyncTestBuilding(t, liveModel, 9, 7, 345, 1, 2)
+	w.SetModel(liveModel)
+
+	baseModel := world.NewWorldModel(16, 16)
+	baseModel.BlockNames = map[int16]string{
+		345: "container",
+	}
+
+	syncWorldDiffToConn(sendConn, w, baseModel)
+	packets := collectRawPacketsUntilTimeout(t, clientSide, 12)
+
+	constructFinishID, ok := srv.Registry.PacketID(&protocol.Remote_ConstructBlock_constructFinish_146{})
+	if !ok {
+		t.Fatal("resolve constructFinish packet id")
+	}
+	setTileID, ok := srv.Registry.PacketID(&protocol.Remote_Tile_setTile_140{})
+	if !ok {
+		t.Fatal("resolve setTile packet id")
+	}
+
+	constructIdx := -1
+	setTileIdx := -1
+	descriptions := make([]string, 0, len(packets))
+	for idx, packet := range packets {
+		if len(packet) == 0 {
+			continue
+		}
+		packetID, payload := decodeFramedPacket(t, packet)
+		switch packetID {
+		case constructFinishID:
+			typed := &protocol.Remote_ConstructBlock_constructFinish_146{}
+			r := protocol.NewReaderWithContext(payload, srv.TypeIO)
+			if err := typed.Read(r, 0); err != nil {
+				t.Fatalf("decode constructFinish failed: %v", err)
+			}
+			pos := int32(-1)
+			if typed.Tile != nil {
+				pos = typed.Tile.Pos()
+			}
+			descriptions = append(descriptions, fmt.Sprintf("constructFinish(pos=%d)", pos))
+			if pos == targetPos && constructIdx < 0 {
+				constructIdx = idx
+			}
+		case setTileID:
+			typed := &protocol.Remote_Tile_setTile_140{}
+			r := protocol.NewReaderWithContext(payload, srv.TypeIO)
+			if err := typed.Read(r, 0); err != nil {
+				t.Fatalf("decode setTile failed: %v", err)
+			}
+			pos := int32(-1)
+			if typed.Tile != nil {
+				pos = typed.Tile.Pos()
+			}
+			descriptions = append(descriptions, fmt.Sprintf("setTile(pos=%d)", pos))
+			if pos == targetPos && setTileIdx < 0 {
+				setTileIdx = idx
+			}
+		default:
+			descriptions = append(descriptions, fmt.Sprintf("packetID=%d", packetID))
+		}
+	}
+
+	if constructIdx < 0 {
+		t.Fatalf("expected diff sync to emit constructFinish for air->building transition, got packets: %s", strings.Join(descriptions, ", "))
+	}
+	if setTileIdx < 0 {
+		t.Fatalf("expected diff sync to emit setTile for air->building transition, got packets: %s", strings.Join(descriptions, ", "))
+	}
+	if constructIdx > setTileIdx {
+		t.Fatalf("expected constructFinish before setTile for air->building transition, got packets: %s", strings.Join(descriptions, ", "))
+	}
+}
+
 func TestSyncCurrentWorldToConnIncludesBuildingConfigs(t *testing.T) {
 	srv := netserver.NewServer("127.0.0.1:0", 157)
 	srv.TypeIO.BuildingLookup = func(pos int32) protocol.Building {
@@ -908,12 +1100,11 @@ func TestSyncCurrentWorldToConnSendsBlockSnapshotsBeforeTileConfig(t *testing.T)
 	}
 	nodePos := placeSyncTestBuilding(t, model, 8, 10, 422, 1, 0)
 	_ = placeSyncTestBuilding(t, model, 14, 10, 421, 1, 0)
-	_ = placeSyncTestBuilding(t, model, 9, 8, 500, 1, 0)
+	storePos := placeSyncTestBuilding(t, model, 9, 8, 500, 1, 0)
 	storeTile, err := model.TileAt(9, 8)
 	if err != nil || storeTile == nil || storeTile.Build == nil {
 		t.Fatalf("container tile lookup failed: %v", err)
 	}
-	storeWirePos := int32(storeTile.Y*model.Width + storeTile.X)
 	storeTile.Build.Items = []world.ItemStack{{Item: 0, Amount: 37}}
 	w.SetModel(model)
 	w.ConfigureBuildingPacked(nodePos, protocol.Point2{X: 6, Y: 0})
@@ -951,7 +1142,7 @@ func TestSyncCurrentWorldToConnSendsBlockSnapshotsBeforeTileConfig(t *testing.T)
 			if err != nil {
 				t.Fatalf("read blockSnapshot pos failed: %v", err)
 			}
-			if pos == storeWirePos {
+			if pos == storePos {
 				foundStoreSnapshot = true
 			}
 		case tileConfigID:
@@ -972,7 +1163,7 @@ func TestSyncCurrentWorldToConnSendsBlockSnapshotsBeforeTileConfig(t *testing.T)
 	}
 }
 
-func TestSyncAuthoritativeWorldToConnUsesLiveWorldStreamRuntimeOnly(t *testing.T) {
+func TestSyncAuthoritativeWorldToConnRepairsUnsupportedLiveWorldStreamBuildings(t *testing.T) {
 	srv := netserver.NewServer("127.0.0.1:0", 157)
 	srv.TypeIO.BuildingLookup = func(pos int32) protocol.Building {
 		return protocol.BuildingBox{PosValue: pos}
@@ -1014,20 +1205,32 @@ func TestSyncAuthoritativeWorldToConnUsesLiveWorldStreamRuntimeOnly(t *testing.T
 		t.Fatal("resolve tileConfig packet id")
 	}
 
+	foundSetTile := false
+	foundBlockSnapshot := false
+	foundTileConfig := false
 	for _, packet := range packets {
 		if len(packet) == 0 {
 			continue
 		}
 		packetID, _ := decodeFramedPacket(t, packet)
 		if packetID == setTileID {
-			t.Fatalf("expected live-world authoritative sync to avoid full setTile replay")
+			foundSetTile = true
 		}
 		if packetID == blockSnapshotID {
-			t.Fatalf("expected live-world authoritative sync to avoid extra blockSnapshot replay after live world stream")
+			foundBlockSnapshot = true
 		}
 		if packetID == tileConfigID {
-			t.Fatalf("expected live-world authoritative sync to avoid extra tileConfig replay after live world stream")
+			foundTileConfig = true
 		}
+	}
+	if !foundSetTile {
+		t.Fatal("expected live-world authoritative sync to repair unsupported buildings with setTile")
+	}
+	if !foundBlockSnapshot {
+		t.Fatal("expected live-world authoritative sync to replay runtime blockSnapshot state for unsupported live payloads")
+	}
+	if !foundTileConfig {
+		t.Fatal("expected live-world authoritative sync to replay runtime tileConfig state for unsupported live payloads")
 	}
 }
 
@@ -1083,6 +1286,80 @@ func TestSyncAuthoritativeWorldToConnWithBaseModelStillReplaysRuntimeBlockSnapsh
 	}
 	if !foundBlockSnapshot {
 		t.Fatal("expected matching-base dynamic sync to replay runtime blockSnapshot state")
+	}
+}
+
+func TestSyncDeferredLiveRuntimeStateToConnAvoidsFullSetTileReplay(t *testing.T) {
+	srv := netserver.NewServer("127.0.0.1:0", 157)
+	srv.TypeIO.BuildingLookup = func(pos int32) protocol.Building {
+		return protocol.BuildingBox{PosValue: pos}
+	}
+	serverSide, clientSide := net.Pipe()
+	defer serverSide.Close()
+	defer clientSide.Close()
+
+	sendConn := netserver.NewConn(serverSide, srv.Serial)
+	defer sendConn.Close()
+	sendConn.SetLiveWorldStream(true)
+
+	w := world.New(world.Config{TPS: 60})
+	model := world.NewWorldModel(24, 24)
+	model.BlockNames = map[int16]string{
+		600: "sorter",
+	}
+	sorterPos := placeSyncTestBuilding(t, model, 8, 10, 600, 1, 0)
+	w.SetModel(model)
+	w.ConfigureBuildingPacked(sorterPos, int16(4))
+	if !w.HasLiveMapStreamPayloadPacked(sorterPos) {
+		t.Fatal("expected test sorter to be supported by live world-stream payloads")
+	}
+
+	syncDeferredLiveRuntimeStateToConn(srv, sendConn, w, "maps/test.msav")
+	packets := collectRawPacketsUntilTimeout(t, clientSide, 24)
+
+	setTileID, ok := srv.Registry.PacketID(&protocol.Remote_Tile_setTile_140{})
+	if !ok {
+		t.Fatal("resolve setTile packet id")
+	}
+	blockSnapshotID, ok := srv.Registry.PacketID(&protocol.Remote_NetClient_blockSnapshot_34{})
+	if !ok {
+		t.Fatal("resolve blockSnapshot packet id")
+	}
+	buildHealthID, ok := srv.Registry.PacketID(&protocol.Remote_Tile_buildHealthUpdate_144{})
+	if !ok {
+		t.Fatal("resolve buildHealthUpdate packet id")
+	}
+	tileConfigID, ok := srv.Registry.PacketID(&protocol.Remote_InputHandler_tileConfig_90{})
+	if !ok {
+		t.Fatal("resolve tileConfig packet id")
+	}
+
+	foundSetTile := false
+	foundRuntimeRepair := false
+	foundTileConfig := false
+	for _, packet := range packets {
+		if len(packet) == 0 {
+			continue
+		}
+		packetID, _ := decodeFramedPacket(t, packet)
+		if packetID == setTileID {
+			foundSetTile = true
+		}
+		if packetID == blockSnapshotID || packetID == buildHealthID {
+			foundRuntimeRepair = true
+		}
+		if packetID == tileConfigID {
+			foundTileConfig = true
+		}
+	}
+	if foundSetTile {
+		t.Fatal("expected deferred live runtime repair to avoid full setTile replay")
+	}
+	if !foundRuntimeRepair {
+		t.Fatal("expected deferred live runtime repair to replay runtime block state without full tile rebuild")
+	}
+	if !foundTileConfig {
+		t.Fatal("expected deferred live runtime repair to replay runtime tileConfig state")
 	}
 }
 
@@ -1151,12 +1428,11 @@ func TestSendBlockSnapshotsToConnEmitsBlockSnapshotPayload(t *testing.T) {
 	model.BlockNames = map[int16]string{
 		500: "container",
 	}
-	_ = placeSyncTestBuilding(t, model, 9, 8, 500, 1, 0)
+	containerPos := placeSyncTestBuilding(t, model, 9, 8, 500, 1, 0)
 	tile, err := model.TileAt(9, 8)
 	if err != nil || tile == nil || tile.Build == nil {
 		t.Fatalf("container tile lookup failed: %v", err)
 	}
-	containerWirePos := int32(tile.Y*model.Width + tile.X)
 	tile.Build.Items = []world.ItemStack{{Item: 0, Amount: 37}}
 	w.SetModel(model)
 
@@ -1190,7 +1466,7 @@ func TestSendBlockSnapshotsToConnEmitsBlockSnapshotPayload(t *testing.T) {
 			if err != nil {
 				t.Fatalf("read blockSnapshot block failed: %v", err)
 			}
-			if pos == containerWirePos && blockID == 500 {
+			if pos == containerPos && blockID == 500 {
 				foundSnapshot = true
 				break
 			}
@@ -1202,6 +1478,95 @@ func TestSendBlockSnapshotsToConnEmitsBlockSnapshotPayload(t *testing.T) {
 
 	if !foundSnapshot {
 		t.Fatalf("expected sendBlockSnapshotsToConn to emit blockSnapshot payload for synced container, got packets: %s", strings.Join(descriptions, ", "))
+	}
+}
+
+func TestSendBlockSnapshotsToConnFiltersHiddenEnemySnapshotsByViewerTeam(t *testing.T) {
+	prevPath := currentRuntimeWorldPath()
+	runtimeWorldPath.Store(filepath.Join("assets", "worlds", "maps", "serpulo", "hidden", "55.msav"))
+	defer runtimeWorldPath.Store(prevPath)
+
+	srv := netserver.NewServer("127.0.0.1:0", 157)
+	blockSnapshotID, ok := srv.Registry.PacketID(&protocol.Remote_NetClient_blockSnapshot_34{})
+	if !ok {
+		t.Fatal("resolve blockSnapshot packet id")
+	}
+
+	w := world.New(world.Config{TPS: 60})
+	model := world.NewWorldModel(24, 24)
+	model.BlockNames = map[int16]string{
+		500: "container",
+	}
+	containerPos := placeSyncTestBuilding(t, model, 9, 8, 500, 2, 0)
+	tile, err := model.TileAt(9, 8)
+	if err != nil || tile == nil || tile.Build == nil {
+		t.Fatalf("container tile lookup failed: %v", err)
+	}
+	tile.Build.Items = []world.ItemStack{{Item: 0, Amount: 37}}
+	w.SetModel(model)
+
+	enemyServer, enemyClient := net.Pipe()
+	defer enemyServer.Close()
+	defer enemyClient.Close()
+	enemyConn := netserver.NewConn(enemyServer, srv.Serial)
+	defer enemyConn.Close()
+	enemyConn.SetTeamID(1)
+
+	sendBlockSnapshotsToConn(enemyConn, w)
+	enemyPackets := collectRawPacketsUntilTimeout(t, enemyClient, 4)
+	for _, packet := range enemyPackets {
+		if len(packet) == 0 {
+			continue
+		}
+		packetID, _ := decodeFramedPacket(t, packet)
+		if packetID == blockSnapshotID {
+			t.Fatalf("expected hidden enemy snapshot to be filtered for viewer team 1, got packetID=%d", packetID)
+		}
+	}
+
+	allyServer, allyClient := net.Pipe()
+	defer allyServer.Close()
+	defer allyClient.Close()
+	allyConn := netserver.NewConn(allyServer, srv.Serial)
+	defer allyConn.Close()
+	allyConn.SetTeamID(2)
+
+	sendBlockSnapshotsToConn(allyConn, w)
+	allyPackets := collectRawPacketsUntilTimeout(t, allyClient, 4)
+	foundSnapshot := false
+	for _, packet := range allyPackets {
+		if len(packet) == 0 {
+			continue
+		}
+		packetID, payload := decodeFramedPacket(t, packet)
+		if packetID != blockSnapshotID {
+			continue
+		}
+		typed := &protocol.Remote_NetClient_blockSnapshot_34{}
+		if err := typed.Read(protocol.NewReader(payload), 0); err != nil {
+			t.Fatalf("decode blockSnapshot failed: %v", err)
+		}
+		r := protocol.NewReader(typed.Data)
+		for i := 0; i < int(typed.Amount); i++ {
+			pos, err := r.ReadInt32()
+			if err != nil {
+				t.Fatalf("read blockSnapshot pos failed: %v", err)
+			}
+			blockID, err := r.ReadInt16()
+			if err != nil {
+				t.Fatalf("read blockSnapshot block failed: %v", err)
+			}
+			if pos == containerPos && blockID == 500 {
+				foundSnapshot = true
+				break
+			}
+			if _, err := protocol.ReadBytes(r); err != nil {
+				t.Fatalf("read blockSnapshot payload failed: %v", err)
+			}
+		}
+	}
+	if !foundSnapshot {
+		t.Fatal("expected allied viewer to keep receiving hidden-map blockSnapshot payload")
 	}
 }
 
@@ -1228,7 +1593,6 @@ func TestSendRequestedBlockSnapshotToConnEmitsOnlyBlockSnapshotPayload(t *testin
 	if err != nil || tile == nil || tile.Build == nil {
 		t.Fatalf("container tile lookup failed: %v", err)
 	}
-	containerWirePos := int32(tile.Y*model.Width + tile.X)
 	tile.Build.Items = []world.ItemStack{{Item: 0, Amount: 37}}
 	w.SetModel(model)
 
@@ -1266,8 +1630,8 @@ func TestSendRequestedBlockSnapshotToConnEmitsOnlyBlockSnapshotPayload(t *testin
 	if err != nil {
 		t.Fatalf("read requested blockSnapshot block failed: %v", err)
 	}
-	if pos != containerWirePos || blockID != 500 {
-		t.Fatalf("expected requested container snapshot pos=%d block=500, got pos=%d block=%d", containerWirePos, pos, blockID)
+	if pos != containerPos || blockID != 500 {
+		t.Fatalf("expected requested container snapshot pos=%d block=500, got pos=%d block=%d", containerPos, pos, blockID)
 	}
 }
 
@@ -1355,7 +1719,7 @@ func TestSyncWorldDiffToConnReplaysRuntimeStateForUnchangedContainer(t *testing.
 	model.BlockNames = map[int16]string{
 		500: "container",
 	}
-	_ = placeSyncTestBuilding(t, model, 9, 8, 500, 1, 0)
+	containerPos := placeSyncTestBuilding(t, model, 9, 8, 500, 1, 0)
 	baseModel := model.Clone()
 	if baseModel == nil {
 		t.Fatal("expected base model clone")
@@ -1364,7 +1728,6 @@ func TestSyncWorldDiffToConnReplaysRuntimeStateForUnchangedContainer(t *testing.
 	if err != nil || tile == nil || tile.Build == nil {
 		t.Fatalf("container tile lookup failed: %v", err)
 	}
-	containerWirePos := int32(tile.Y*model.Width + tile.X)
 	tile.Build.Items = []world.ItemStack{{Item: 0, Amount: 42}}
 	w.SetModel(model)
 
@@ -1393,7 +1756,7 @@ func TestSyncWorldDiffToConnReplaysRuntimeStateForUnchangedContainer(t *testing.
 		if err != nil {
 			t.Fatalf("read blockSnapshot pos failed: %v", err)
 		}
-		if pos == containerWirePos {
+		if pos == containerPos {
 			foundContainerSnapshot = true
 			break
 		}

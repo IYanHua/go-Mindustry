@@ -227,6 +227,7 @@ type Server struct {
 	entitySnapshotIntervalNs  atomic.Int64
 	stateSnapshotIntervalNs   atomic.Int64
 	clientSnapshotConfirm     atomic.Bool
+	verifyClientPosition      atomic.Bool
 	infoMu                    sync.RWMutex
 	verboseNetLog             atomic.Bool
 	packetRecvEventsEnabled   atomic.Bool
@@ -863,6 +864,20 @@ func (s *Server) ClientSnapshotConnectFallbackEnabled() bool {
 	return s.clientSnapshotConfirm.Load()
 }
 
+func (s *Server) SetClientPositionVerificationEnabled(enabled bool) {
+	if s == nil {
+		return
+	}
+	s.verifyClientPosition.Store(enabled)
+}
+
+func (s *Server) ClientPositionVerificationEnabled() bool {
+	if s == nil {
+		return false
+	}
+	return s.verifyClientPosition.Load()
+}
+
 func (s *Server) SnapshotIntervalsMs() (entityMs int, stateMs int) {
 	entity := time.Duration(s.entitySnapshotIntervalNs.Load())
 	state := time.Duration(s.stateSnapshotIntervalNs.Load())
@@ -1405,6 +1420,9 @@ func (s *Server) handlePacket(c *Conn, obj any, fromTCP bool) {
 			now := time.Now()
 			freshSpawnGrace := s.connHasFreshSpawnBinding(c, now, 2*time.Second)
 			recentRespawnGrace := s.connHasRecentRespawnWindow(c, now, 2*time.Second)
+			liveWorldLoadAge, hasLiveWorldLoadAge := s.connLiveWorldLoadSettleAge(c, now)
+			liveWorldLoadGrace := hasLiveWorldLoadAge && liveWorldLoadAge < 8*time.Second
+			liveWorldLoadAge = liveWorldLoadAge.Round(10 * time.Millisecond)
 			skipDeadRepair := false
 			// Only honor client-dead when server agrees the unit is missing or dead.
 			shouldDead := c.unitID == 0 && !c.controlBuildActive
@@ -1416,8 +1434,12 @@ func (s *Server) handlePacket(c *Conn, obj any, fromTCP bool) {
 					debugInfo = "build=missing"
 					shouldDead = true
 				}
-			} else if shouldDead && s.connHasRecentRespawnWindow(c, now, 2*time.Second) {
+			} else if shouldDead && recentRespawnGrace {
 				debugInfo = fmt.Sprintf("unit=0 respawn_age=%s", now.Sub(recentNonZeroTime(c.lastSpawnAt, c.lastRespawnReq)).Round(10*time.Millisecond))
+				shouldDead = false
+				skipDeadRepair = true
+			} else if shouldDead && liveWorldLoadGrace {
+				debugInfo = fmt.Sprintf("unit=0 world=loading live_age=%s", liveWorldLoadAge)
 				shouldDead = false
 				skipDeadRepair = true
 			} else if !shouldDead {
@@ -1426,6 +1448,10 @@ func (s *Server) handlePacket(c *Conn, obj any, fromTCP bool) {
 					if !ok {
 						if freshSpawnGrace || recentRespawnGrace {
 							debugInfo = fmt.Sprintf("unit=%d world=missing respawn_age=%s", c.unitID, now.Sub(recentNonZeroTime(c.lastSpawnAt, c.lastRespawnReq)).Round(10*time.Millisecond))
+							shouldDead = false
+							skipDeadRepair = true
+						} else if liveWorldLoadGrace {
+							debugInfo = fmt.Sprintf("unit=%d world=missing live_age=%s", c.unitID, liveWorldLoadAge)
 							shouldDead = false
 							skipDeadRepair = true
 						} else {
@@ -1442,6 +1468,10 @@ func (s *Server) handlePacket(c *Conn, obj any, fromTCP bool) {
 								now.Sub(recentNonZeroTime(c.lastSpawnAt, c.lastRespawnReq)).Round(10*time.Millisecond))
 							shouldDead = false
 							skipDeadRepair = true
+						} else if liveWorldLoadGrace {
+							debugInfo = fmt.Sprintf("unit=%d world_hp=%.2f team=%d type=%d live_age=%s",
+								c.unitID, info.Health, info.TeamID, info.TypeID, liveWorldLoadAge)
+							shouldDead = false
 						}
 					}
 				} else {
@@ -1517,32 +1547,14 @@ func (s *Server) handlePacket(c *Conn, obj any, fromTCP bool) {
 			s.detachConnUnit(c, prevUnitID)
 		}
 
+		verifyPosition := s.ClientPositionVerificationEnabled()
 		// Apply motion/position into authoritative world state when possible.
 		ignorePosition := c.controlBuildActive || v.Dead || c.unitID == 0 || (v.UnitID != 0 && v.UnitID != c.unitID)
 		if !ignorePosition {
-			// If the client jumps too far away, correct them back to server position.
-			// Vanilla uses tilesize*14. tilesize=8, so correctDist=112.
-			const correctDist = 112.0
-			var curX, curY float32
-			var hasCur bool
-			if s.UnitInfoFn != nil {
-				if info, ok := s.UnitInfoFn(c.unitID); ok {
-					curX, curY, hasCur = info.X, info.Y, true
-				}
-			}
-			if !hasCur {
-				// Fallback to last known snapshot position.
-				curX, curY, hasCur = c.snapX, c.snapY, true
-			}
-			dx := float64(v.X - curX)
-			dy := float64(v.Y - curY)
-			dist := math.Hypot(dx, dy)
-			if dist > correctDist {
-				_ = c.SendAsync(&protocol.Remote_NetClient_setPosition_29{X: curX, Y: curY})
-				// Keep server-side snap in sync with authoritative position.
-				c.snapX, c.snapY = curX, curY
-			} else {
-				// Non-strict mode: accept client-reported state and apply to world.
+			if !verifyPosition {
+				// Official NetServer.clientSnapshot() only verifies position in
+				// strict/headless mode. The normal dedicated-server path accepts
+				// the client snapshot as authoritative movement input.
 				c.snapX = v.X
 				c.snapY = v.Y
 				if s.SetUnitMotionFn != nil {
@@ -1550,6 +1562,38 @@ func (s *Server) handlePacket(c *Conn, obj any, fromTCP bool) {
 				}
 				if s.SetUnitPositionFn != nil {
 					_ = s.SetUnitPositionFn(c.unitID, v.X, v.Y, v.Rotation)
+				}
+			} else {
+				// If the client jumps too far away, correct them back to server position.
+				// Vanilla uses tilesize*14. tilesize=8, so correctDist=112.
+				const correctDist = 112.0
+				var curX, curY float32
+				var hasCur bool
+				if s.UnitInfoFn != nil {
+					if info, ok := s.UnitInfoFn(c.unitID); ok {
+						curX, curY, hasCur = info.X, info.Y, true
+					}
+				}
+				if !hasCur {
+					// Fallback to last known snapshot position.
+					curX, curY, hasCur = c.snapX, c.snapY, true
+				}
+				dx := float64(v.X - curX)
+				dy := float64(v.Y - curY)
+				dist := math.Hypot(dx, dy)
+				if dist > correctDist {
+					_ = c.SendAsync(&protocol.Remote_NetClient_setPosition_29{X: curX, Y: curY})
+					// Keep server-side snap in sync with authoritative position.
+					c.snapX, c.snapY = curX, curY
+				} else {
+					c.snapX = v.X
+					c.snapY = v.Y
+					if s.SetUnitMotionFn != nil {
+						_ = s.SetUnitMotionFn(c.unitID, v.XVelocity, v.YVelocity, 0)
+					}
+					if s.SetUnitPositionFn != nil {
+						_ = s.SetUnitPositionFn(c.unitID, v.X, v.Y, v.Rotation)
+					}
 				}
 			}
 		} else if !c.controlBuildActive {
@@ -2709,6 +2753,8 @@ type Conn struct {
 	liveWorldStream       bool
 	pendingReloadConfirms int
 	pendingReloadRespawns int
+	respawnChainActive    bool
+	respawnChainName      string
 	unitID                int32
 	controlBuildPos       int32
 	controlBuildActive    bool
@@ -3154,6 +3200,41 @@ func (c *Conn) takeQueuedReloadConfirm() (pending bool, respawn bool) {
 		respawn = true
 	}
 	return true, respawn
+}
+
+func (c *Conn) beginRespawnChain(name string) bool {
+	if c == nil {
+		return false
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.respawnChainActive {
+		return false
+	}
+	c.respawnChainActive = true
+	c.respawnChainName = name
+	return true
+}
+
+func (c *Conn) endRespawnChain(name string) {
+	if c == nil {
+		return
+	}
+	c.mu.Lock()
+	if c.respawnChainActive && (name == "" || c.respawnChainName == "" || c.respawnChainName == name) {
+		c.respawnChainActive = false
+		c.respawnChainName = ""
+	}
+	c.mu.Unlock()
+}
+
+func (c *Conn) respawnChainInProgress() bool {
+	if c == nil {
+		return false
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.respawnChainActive
 }
 
 func (c *Conn) SendAsyncPriority(obj any, prio int) error {
@@ -4120,6 +4201,7 @@ func (s *Server) prepareInitialConnectState(c *Conn) {
 	c.lastSpawnRepairAt = time.Time{}
 	c.lastDeadIgnoreAt = time.Time{}
 	c.clientDeadIgnores = 0
+	c.endRespawnChain("")
 	c.miningTilePos = invalidTilePos
 	if p := s.ensurePlayerEntity(c); p != nil {
 		s.updatePlayerEntity(p, c)
@@ -4163,6 +4245,10 @@ func (s *Server) scheduleInitialConnectRespawn(c *Conn) {
 			return
 		default:
 		}
+		if !c.beginRespawnChain("initial-connect") {
+			return
+		}
+		defer c.endRespawnChain("initial-connect")
 		now := time.Now()
 		if !c.hasConnected || c.playerID == 0 || !c.dead || c.unitID != 0 || c.controlBuildActive {
 			return
@@ -4275,10 +4361,6 @@ func (s *Server) controlBlockUnit(c *Conn, buildPos int32) bool {
 		}
 	}
 	return true
-}
-
-func (s *Server) HandleBuildingControlSelect(c *Conn, buildPos int32) bool {
-	return s.controlBlockUnit(c, buildPos)
 }
 
 func (s *Server) currentPlayerUnitState(c *Conn) (*protocol.UnitEntitySync, bool) {
@@ -4599,6 +4681,9 @@ func (s *Server) handleOfficialUnitClear(c *Conn) {
 	if c == nil || c.playerID == 0 {
 		return
 	}
+	if c.respawnChainInProgress() {
+		return
+	}
 	if c.InWorldReloadGrace() && c.lastSpawnAt.IsZero() && c.unitID == 0 && !c.controlBuildActive {
 		return
 	}
@@ -4607,6 +4692,10 @@ func (s *Server) handleOfficialUnitClear(c *Conn) {
 		return
 	}
 	if s.connUnitAlive(c) {
+		if !c.beginRespawnChain("official-unitClear") {
+			return
+		}
+		defer c.endRespawnChain("official-unitClear")
 		if s.tryDockedUnitClearRespawn(c, "unitClear-91") {
 			return
 		}
@@ -4624,6 +4713,10 @@ func (s *Server) handleOfficialUnitClear(c *Conn) {
 			c.id, c.playerID, c.unitID, now.Sub(c.lastSpawnAt).Round(10*time.Millisecond))
 		return
 	}
+	if !c.beginRespawnChain("official-unitClear") {
+		return
+	}
+	defer c.endRespawnChain("official-unitClear")
 	c.lastRespawnReq = now
 	s.markDead(c, "unitClear-91")
 	if s.spawnRespawnUnit(c) {
@@ -4694,6 +4787,21 @@ func (s *Server) connHasRecentRespawnWindow(c *Conn, now time.Time, window time.
 	}
 	age := now.Sub(last)
 	return age >= 0 && age < window
+}
+
+func (s *Server) connLiveWorldLoadSettleAge(c *Conn, now time.Time) (time.Duration, bool) {
+	if c == nil || c.playerID == 0 || !c.UsesLiveWorldStream() {
+		return 0, false
+	}
+	start := recentNonZeroTime(c.connectTime, recentNonZeroTime(c.lastSpawnAt, c.lastRespawnReq))
+	if start.IsZero() {
+		return 0, false
+	}
+	age := now.Sub(start)
+	if age < 0 {
+		return 0, false
+	}
+	return age, true
 }
 
 func (s *Server) connHasFreshSpawnBinding(c *Conn, now time.Time, window time.Duration) bool {
@@ -4851,6 +4959,13 @@ func (s *Server) repairOfficialUnitClearAliveBinding(c *Conn) {
 }
 
 func (s *Server) handleDeathTimerRespawn(c *Conn) {
+	if c == nil || c.playerID == 0 {
+		return
+	}
+	if !c.beginRespawnChain("death-timer") {
+		return
+	}
+	defer c.endRespawnChain("death-timer")
 	if s.spawnRespawnUnit(c) {
 		s.finishRespawn(c)
 		s.sendImmediateAliveSync(c, "death-timer")
@@ -4861,6 +4976,13 @@ func (s *Server) handleDeathTimerRespawn(c *Conn) {
 }
 
 func (s *Server) handleMapHotReloadRespawn(c *Conn) {
+	if c == nil || c.playerID == 0 {
+		return
+	}
+	if !c.beginRespawnChain("map-hot-reload") {
+		return
+	}
+	defer c.endRespawnChain("map-hot-reload")
 	if s.spawnRespawnUnit(c) {
 		s.finishRespawn(c)
 		s.sendImmediateAliveSync(c, "map-hot-reload")
@@ -4906,6 +5028,9 @@ func (s *Server) markDead(c *Conn, source string) {
 
 func (s *Server) maybeRespawn(c *Conn) {
 	if c == nil || c.playerID == 0 {
+		return
+	}
+	if c.respawnChainInProgress() {
 		return
 	}
 	if c.InWorldReloadGrace() {

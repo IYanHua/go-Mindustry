@@ -31,15 +31,20 @@ type Entity interface {
 }
 
 type Tile struct {
-	X        int
-	Y        int
-	Floor    FloorID
-	Overlay  OverlayID
-	Block    BlockID
-	Team     TeamID
-	Rotation int8
-	Con      ConID
-	Build    *Building
+	X           int
+	Y           int
+	Floor       FloorID
+	Overlay     OverlayID
+	Block       BlockID
+	Team        TeamID
+	Rotation    int8
+	Con         ConID
+	HasData     bool
+	Data        byte
+	FloorData   byte
+	OverlayData byte
+	ExtraData   int32
+	Build       *Building
 }
 
 type Building struct {

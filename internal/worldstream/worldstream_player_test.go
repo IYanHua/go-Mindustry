@@ -355,13 +355,13 @@ func TestBuildWorldStreamFromMSAVPreservesWorldSections(t *testing.T) {
 	if !bytes.Equal(patches, expectedPatches) {
 		t.Fatal("expected world stream content patches bytes to match msav patches chunk")
 	}
+	decoded, err := decodeMapChunk(mapChunk)
+	if err != nil {
+		t.Fatalf("decode built world stream map chunk: %v", err)
+	}
 	original, err := LoadWorldModelFromMSAV(path, nil)
 	if err != nil {
 		t.Fatalf("load original model: %v", err)
-	}
-	decoded, err := decodeMapChunkForVersion(mapChunk, original.MSAVVersion, original.BlockNames)
-	if err != nil {
-		t.Fatalf("decode built world stream map chunk: %v", err)
 	}
 	if decoded.Width != original.Width || decoded.Height != original.Height {
 		t.Fatalf("expected normalized world stream map size %dx%d, got %dx%d", original.Width, original.Height, decoded.Width, decoded.Height)
@@ -406,6 +406,63 @@ func TestBuildWorldStreamFromMSAVUsesDirectPlayerPayload(t *testing.T) {
 	expected := directPlayerPayloadForTest(t)
 	if !bytes.Equal(playerPayload, expected) {
 		t.Fatalf("expected BuildWorldStreamFromMSAV to use direct player payload, got len=%d want=%d", len(playerPayload), len(expected))
+	}
+}
+
+func TestBuildWorldStreamFromModernMSAVPreservesRawMapChunkWithTileSaveData(t *testing.T) {
+	var mapChunk bytes.Buffer
+	w := &javaWriter{buf: &mapChunk}
+	if err := w.WriteInt16(1); err != nil {
+		t.Fatalf("write width: %v", err)
+	}
+	if err := w.WriteInt16(1); err != nil {
+		t.Fatalf("write height: %v", err)
+	}
+	if err := w.WriteInt16(0); err != nil {
+		t.Fatalf("write floor: %v", err)
+	}
+	if err := w.WriteInt16(0); err != nil {
+		t.Fatalf("write overlay: %v", err)
+	}
+	if err := w.WriteByte(0); err != nil {
+		t.Fatalf("write floor run: %v", err)
+	}
+	if err := w.WriteInt16(0); err != nil {
+		t.Fatalf("write block id: %v", err)
+	}
+	if err := w.WriteByte(4); err != nil {
+		t.Fatalf("write packed flags: %v", err)
+	}
+	if err := w.WriteByte(7); err != nil {
+		t.Fatalf("write tile data: %v", err)
+	}
+	if err := w.WriteByte(8); err != nil {
+		t.Fatalf("write floor data: %v", err)
+	}
+	if err := w.WriteByte(9); err != nil {
+		t.Fatalf("write overlay data: %v", err)
+	}
+	if err := w.WriteInt32(0x01020304); err != nil {
+		t.Fatalf("write extra data: %v", err)
+	}
+
+	contentChunk := buildMSAVContentChunkWithBlocks(t, []string{"air"})
+	raw := buildMSAVWithContentAndMap(t, contentChunk, mapChunk.Bytes())
+
+	dir := t.TempDir()
+	path := filepath.Join(dir, "savedata.msav")
+	if err := os.WriteFile(path, raw, 0o644); err != nil {
+		t.Fatalf("write temp msav: %v", err)
+	}
+
+	payload, err := BuildWorldStreamFromMSAV(path)
+	if err != nil {
+		t.Fatalf("build world stream: %v", err)
+	}
+
+	_, _, builtMapChunk, _, _, _ := readWorldStreamCoreSections(t, payload, -1, -1, -1)
+	if !bytes.Equal(builtMapChunk, mapChunk.Bytes()) {
+		t.Fatalf("expected modern msav map chunk with tile save-data to be preserved\nwant=%v\ngot=%v", mapChunk.Bytes(), builtMapChunk)
 	}
 }
 

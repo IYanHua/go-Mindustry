@@ -151,6 +151,15 @@ func placeTestBuilding(t *testing.T, w *World, x, y int, block int16, team TeamI
 	return tile
 }
 
+func containsPos(slice []int32, pos int32) bool {
+	for _, existing := range slice {
+		if existing == pos {
+			return true
+		}
+	}
+	return false
+}
+
 func mustEncodeConfig(t *testing.T, value any) []byte {
 	t.Helper()
 	w := protocol.NewWriter()
@@ -173,6 +182,86 @@ func stepForSeconds(w *World, seconds float32) {
 	}
 	for i := 0; i < frames; i++ {
 		w.Step(time.Second / 60)
+	}
+}
+
+func TestRebuildBlockOccupancyIndexesPhaseBuckets(t *testing.T) {
+	w := New(Config{TPS: 60})
+	model := NewWorldModel(24, 24)
+	model.BlockNames = map[int16]string{
+		1:  "item-source",
+		2:  "liquid-source",
+		3:  "conveyor",
+		4:  "duct-router",
+		5:  "bridge-conveyor",
+		6:  "unloader",
+		7:  "mass-driver",
+		8:  "conduit",
+		9:  "liquid-router",
+		10: "bridge-conduit",
+		11: "payload-conveyor",
+		12: "ground-factory",
+		13: "thorium-reactor",
+		14: "additive-reconstructor",
+	}
+	w.SetModel(model)
+
+	builds := []struct {
+		x, y  int
+		block int16
+	}{
+		{2, 2, 1},
+		{4, 2, 2},
+		{6, 2, 3},
+		{8, 2, 4},
+		{10, 2, 5},
+		{12, 2, 6},
+		{14, 2, 7},
+		{2, 6, 8},
+		{4, 6, 9},
+		{6, 6, 10},
+		{8, 6, 11},
+		{10, 6, 12},
+		{12, 6, 13},
+		{14, 6, 14},
+	}
+	positions := make(map[int16]int32, len(builds))
+	for _, build := range builds {
+		tile := placeTestBuilding(t, w, build.x, build.y, build.block, 1, 0)
+		positions[build.block] = int32(tile.Y*w.Model().Width + tile.X)
+	}
+
+	checks := []struct {
+		name  string
+		slice []int32
+		pos   int32
+	}{
+		{"sandbox item-source", w.sandboxItemSourceTiles, positions[1]},
+		{"sandbox liquid-source", w.sandboxLiquidSourceTiles, positions[2]},
+		{"item conveyor", w.itemConveyorTilePositions, positions[3]},
+		{"item duct/router", w.itemDuctTilePositions, positions[4]},
+		{"item bridge", w.itemBridgeTilePositions, positions[5]},
+		{"item unloader", w.itemUnloaderTilePositions, positions[6]},
+		{"item mass-driver", w.itemMassDriverTilePositions, positions[7]},
+		{"liquid conduit", w.liquidConduitTilePositions, positions[8]},
+		{"liquid storage", w.liquidStorageTilePositions, positions[9]},
+		{"liquid bridge", w.liquidBridgeTilePositions, positions[10]},
+		{"payload transport", w.payloadTransportTiles, positions[11]},
+		{"payload factory", w.payloadFactoryTilePositions, positions[12]},
+		{"reactor", w.reactorTilePositions, positions[13]},
+		{"payload reconstructor", w.payloadFactoryTilePositions, positions[14]},
+	}
+	for _, check := range checks {
+		if !containsPos(check.slice, check.pos) {
+			t.Fatalf("expected %s bucket to contain pos=%d", check.name, check.pos)
+		}
+	}
+
+	if containsPos(w.payloadTransportTiles, positions[12]) {
+		t.Fatalf("ground-factory should not be indexed as payload transport")
+	}
+	if containsPos(w.payloadFactoryTilePositions, positions[11]) {
+		t.Fatalf("payload-conveyor should not be indexed as payload factory")
 	}
 }
 
@@ -1260,6 +1349,129 @@ func TestDestroyingLinkedPowerBuildingClearsBothSides(t *testing.T) {
 	}
 	if node.Build != nil && len(node.Build.Config) != 0 {
 		t.Fatalf("expected node stored config bytes to clear after destroy, got=%d", len(node.Build.Config))
+	}
+}
+
+func TestDestroyTileRemovesPowerIndexes(t *testing.T) {
+	w := New(Config{TPS: 60})
+	model := NewWorldModel(24, 24)
+	model.BlockNames = map[int16]string{
+		422: "power-node",
+		480: "diode",
+		481: "power-void",
+	}
+	w.SetModel(model)
+
+	node := placeTestBuilding(t, w, 6, 10, 422, 1, 0)
+	diode := placeTestBuilding(t, w, 10, 10, 480, 1, 0)
+	voidTile := placeTestBuilding(t, w, 14, 10, 481, 1, 0)
+
+	w.destroyTileLocked(node, 1, 0)
+	if got := len(w.powerTilePositions); got != 2 {
+		t.Fatalf("expected power tile count 2 after removing node, got %d", got)
+	}
+	if got := len(w.teamPowerTiles[1]); got != 2 {
+		t.Fatalf("expected team power tile count 2 after removing node, got %d", got)
+	}
+	if got := len(w.teamPowerNodeTiles[1]); got != 0 {
+		t.Fatalf("expected no team power nodes after removing node, got %d", got)
+	}
+
+	w.destroyTileLocked(diode, 1, 0)
+	if got := len(w.powerTilePositions); got != 1 {
+		t.Fatalf("expected power tile count 1 after removing diode, got %d", got)
+	}
+	if got := len(w.powerDiodeTilePositions); got != 0 {
+		t.Fatalf("expected no power diodes after removal, got %d", got)
+	}
+
+	w.destroyTileLocked(voidTile, 1, 0)
+	if got := len(w.powerTilePositions); got != 0 {
+		t.Fatalf("expected all power tiles removed, got %d", got)
+	}
+	if got := len(w.powerVoidTilePositions); got != 0 {
+		t.Fatalf("expected no power void tiles after removal, got %d", got)
+	}
+	if got := len(w.teamPowerTiles[1]); got != 0 {
+		t.Fatalf("expected team power tile list cleared after removals, got %d", got)
+	}
+}
+
+func TestPlaceCompletedBuildingReplacesOldOccupancyAndTeamIndexes(t *testing.T) {
+	w := New(Config{TPS: 60})
+	model := NewWorldModel(32, 32)
+	model.BlockNames = map[int16]string{
+		257: "conveyor",
+		341: "core-nucleus",
+	}
+	w.SetModel(model)
+
+	tile := placeTestBuilding(t, w, 10, 10, 341, 1, 0)
+	pos := int32(tile.Y*model.Width + tile.X)
+	oldFootprint := packTilePos(8, 10)
+	if got := w.blockOccupancy[oldFootprint]; got != pos {
+		t.Fatalf("expected large-building occupancy at footprint cell to point to %d, got %d", pos, got)
+	}
+
+	w.placeCompletedBuildingLocked(pos, tile, 2, 257, 1, nil)
+
+	if got := len(w.activeTilePositions); got != 1 {
+		t.Fatalf("expected exactly one active tile after replacement, got %d", got)
+	}
+	if got := len(w.teamBuildingTiles[1]); got != 0 {
+		t.Fatalf("expected old team building index cleared, got %d", got)
+	}
+	if got := len(w.teamCoreTiles[1]); got != 0 {
+		t.Fatalf("expected old team core index cleared, got %d", got)
+	}
+	if got := len(w.teamBuildingTiles[2]); got != 1 {
+		t.Fatalf("expected replacement to be indexed for new team, got %d", got)
+	}
+	if _, ok := w.blockOccupancy[oldFootprint]; ok {
+		t.Fatalf("expected old large-building footprint occupancy cleared at %d", oldFootprint)
+	}
+	if got := w.blockOccupancy[packTilePos(10, 10)]; got != pos {
+		t.Fatalf("expected new 1x1 occupancy to point to replacement center %d, got %d", pos, got)
+	}
+	if _, ok := w.buildingIndexFromPackedPosLocked(oldFootprint); ok {
+		t.Fatalf("expected no building index at old footprint cell %d after shrinking replacement", oldFootprint)
+	}
+}
+
+func TestPlaceCompletedBuildingReplacingPowerNodeClearsPowerLinksAndIndexes(t *testing.T) {
+	w := New(Config{TPS: 60})
+	model := NewWorldModel(24, 24)
+	model.BlockNames = map[int16]string{
+		257: "conveyor",
+		421: "battery",
+		422: "power-node",
+	}
+	w.SetModel(model)
+
+	node := placeTestBuilding(t, w, 8, 10, 422, 1, 0)
+	battery := placeTestBuilding(t, w, 14, 10, 421, 1, 0)
+	nodePos := int32(node.Y*model.Width + node.X)
+	batteryPos := int32(battery.Y*model.Width + battery.X)
+	w.applyBuildingConfigLocked(nodePos, []protocol.Point2{{X: 6, Y: 0}}, true)
+
+	w.placeCompletedBuildingLocked(nodePos, node, 1, 257, 0, nil)
+
+	if links := w.powerNodeLinks[nodePos]; len(links) != 0 {
+		t.Fatalf("expected replaced power node links cleared, got %v", links)
+	}
+	if links := w.powerNodeLinks[batteryPos]; len(links) != 0 {
+		t.Fatalf("expected reverse power links cleared from battery, got %v", links)
+	}
+	if got := len(w.teamPowerNodeTiles[1]); got != 0 {
+		t.Fatalf("expected no team power nodes after replacement, got %d", got)
+	}
+	if got := len(w.teamPowerTiles[1]); got != 1 {
+		t.Fatalf("expected only the battery to stay in team power tiles, got %d", got)
+	}
+	for _, pos := range w.powerTilePositions {
+		if pos == nodePos {
+			t.Fatalf("expected replaced power node %d to be removed from power tile index", nodePos)
+		}
 	}
 }
 

@@ -32,9 +32,9 @@ func BuildWorldStreamFromModelSnapshot(model *world.WorldModel, playerID int32, 
 		tags[k] = v
 	}
 	tags["wave"] = strconv.Itoa(int(snap.Wave))
-	tags["wavetime"] = fmt.Sprintf("%.2f", snap.WaveTime*60)
+	tags["wavetime"] = fmt.Sprintf("%.2f", snap.WaveTimeTicks())
 	tags["tick"] = fmt.Sprintf("%.0f", float64(snap.Tick))
-	return buildWorldStreamFromModelState(model, tags, playerID, snap.Wave, snap.WaveTime*60, float64(snap.Tick), snap.Rand0, snap.Rand1)
+	return buildWorldStreamFromModelState(model, tags, playerID, snap.Wave, snap.WaveTimeTicks(), float64(snap.Tick), snap.Rand0, snap.Rand1)
 }
 
 func buildWorldStreamFromModelState(model *world.WorldModel, tags map[string]string, playerID int32, wave int32, wavetimeTicks float32, tick float64, rand0, rand1 int64) ([]byte, error) {

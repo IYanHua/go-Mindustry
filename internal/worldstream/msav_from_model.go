@@ -125,20 +125,40 @@ func encodeMapChunkMinimal(model *world.WorldModel) ([]byte, error) {
 		if err := w.WriteInt16(int16(t.Block)); err != nil {
 			return nil, err
 		}
+		hasSaveData := t.HasData
 		isCenter := t.Build != nil && t.Build.X == t.X && t.Build.Y == t.Y
-		if t.Build != nil && !isCenter {
-			if err := w.WriteByte(1); err != nil {
+		hasEntity := t.Build != nil && (!isCenter || len(t.Build.MapSyncData) > 0)
+		packed := byte(0)
+		if hasEntity {
+			packed |= 1
+		}
+		if hasSaveData {
+			packed |= 4
+		}
+		if err := w.WriteByte(packed); err != nil {
+			return nil, err
+		}
+		if hasSaveData {
+			if err := w.WriteByte(t.Data); err != nil {
 				return nil, err
 			}
+			if err := w.WriteByte(t.FloorData); err != nil {
+				return nil, err
+			}
+			if err := w.WriteByte(t.OverlayData); err != nil {
+				return nil, err
+			}
+			if err := w.WriteInt32(t.ExtraData); err != nil {
+				return nil, err
+			}
+		}
+		if hasEntity && !isCenter {
 			if err := w.WriteByte(0); err != nil {
 				return nil, err
 			}
 			continue
 		}
-		if t.Build != nil && isCenter && len(t.Build.MapSyncData) > 0 {
-			if err := w.WriteByte(1); err != nil {
-				return nil, err
-			}
+		if hasEntity && isCenter {
 			if err := w.WriteByte(1); err != nil {
 				return nil, err
 			}
@@ -153,9 +173,8 @@ func encodeMapChunkMinimal(model *world.WorldModel) ([]byte, error) {
 			}
 			continue
 		}
-		// packed: no entity/data
-		if err := w.WriteByte(0); err != nil {
-			return nil, err
+		if hasSaveData {
+			continue
 		}
 		if err := w.WriteByte(0); err != nil {
 			return nil, err

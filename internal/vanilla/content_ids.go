@@ -165,7 +165,7 @@ func ApplyContentIDs(reg *protocol.ContentRegistry, ids *ContentIDsFile) int {
 		total++
 	}
 	for _, e := range ids.Statuses {
-		reg.RegisterStatusEffect(namedStatus{id: e.ID})
+		reg.RegisterStatusEffect(namedStatus{id: e.ID, name: e.Name})
 		total++
 	}
 	for _, e := range ids.Weathers {
@@ -177,11 +177,11 @@ func ApplyContentIDs(reg *protocol.ContentRegistry, ids *ContentIDsFile) int {
 		total++
 	}
 	for _, e := range ids.Effects {
-		reg.RegisterEffect(protocol.Effect{ID: e.ID})
+		reg.RegisterEffect(protocol.Effect{ID: e.ID, Name: e.Name})
 		total++
 	}
 	for _, e := range ids.Sounds {
-		reg.RegisterSound(protocol.Sound{ID: e.ID})
+		reg.RegisterSound(protocol.Sound{ID: e.ID, Name: e.Name})
 		total++
 	}
 	for _, e := range ids.Teams {

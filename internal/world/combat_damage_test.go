@@ -38,6 +38,30 @@ func TestProjectileBuildingDamageRespectsArmorMultiplier(t *testing.T) {
 	}
 }
 
+func TestStepAdvancesBulletsOnlyOncePerTick(t *testing.T) {
+	w := New(Config{TPS: 60})
+	w.SetModel(NewWorldModel(24, 24))
+	w.bullets = append(w.bullets, simBullet{
+		ID:        1,
+		Team:      1,
+		X:         32,
+		Y:         32,
+		LifeSec:   1,
+		HitUnits:  false,
+		HitBuilds: false,
+	})
+
+	delta := time.Second / 60
+	w.Step(delta)
+
+	if got := len(w.bullets); got != 1 {
+		t.Fatalf("expected bullet to stay alive after one step, bullets=%d", got)
+	}
+	if got, want := w.bullets[0].AgeSec, float32(delta.Seconds()); math.Abs(float64(got-want)) > 0.0001 {
+		t.Fatalf("expected bullet age to advance once per tick, got=%f want=%f", got, want)
+	}
+}
+
 func TestProjectileBuildingDamagePierceArmor(t *testing.T) {
 	w := New(Config{TPS: 60})
 	model := NewWorldModel(24, 24)
