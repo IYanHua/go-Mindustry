@@ -13,12 +13,6 @@ import (
 	"mdt-server/internal/worldstream"
 )
 
-const (
-	snapshotL1Capacity = 4
-	snapshotL2Capacity = 16
-	snapshotL3Capacity = 64
-)
-
 type snapshotCacheEntry struct {
 	path       string
 	modTime    time.Time
@@ -38,12 +32,12 @@ type Core3 struct {
 	stats       *Stats
 	serverCore  atomic.Value // *ServerCore
 
-	cacheMu sync.Mutex
-	l1      map[string]*snapshotCacheEntry
-	l2      map[string]*snapshotCacheEntry
-	l3      map[string]*snapshotCacheEntry
+	cacheMu        sync.Mutex
+	entry          *snapshotCacheEntry
+	cacheBaseModel bool
 
-	remote *remoteCore3Client
+	remoteMu sync.RWMutex
+	remote   *remoteCore3Client
 }
 
 func NewCore3(cfg Config) *Core3 {
@@ -58,15 +52,13 @@ func NewCore3(cfg Config) *Core3 {
 		name = "snapshot-core"
 	}
 	return &Core3{
-		name:        name,
-		messages:    make(chan Message, cfg.MessageBuf),
-		workerCount: cfg.WorkerCount,
+		name:           name,
+		messages:       make(chan Message, cfg.MessageBuf),
+		workerCount:    cfg.WorkerCount,
+		cacheBaseModel: true,
 		stats: &Stats{
 			lastUpdate: time.Now().UnixNano(),
 		},
-		l1: map[string]*snapshotCacheEntry{},
-		l2: map[string]*snapshotCacheEntry{},
-		l3: map[string]*snapshotCacheEntry{},
 	}
 }
 
@@ -74,8 +66,15 @@ func (c3 *Core3) SetServerCore(sc *ServerCore) {
 	c3.serverCore.Store(sc)
 }
 
+func (c3 *Core3) SetCacheBaseModel(enabled bool) {
+	if c3 == nil {
+		return
+	}
+	c3.cacheBaseModel = enabled
+}
+
 func (c3 *Core3) Start() {
-	if c3.remote != nil {
+	if c3.remoteClient() != nil {
 		c3.running.Store(true)
 		return
 	}
@@ -105,7 +104,7 @@ func (c3 *Core3) worker() {
 }
 
 func (c3 *Core3) Stop() {
-	if c3.remote != nil {
+	if c3.remoteClient() != nil {
 		c3.running.Store(false)
 		return
 	}
@@ -130,8 +129,8 @@ func (c3 *Core3) Send(msg Message) bool {
 }
 
 func (c3 *Core3) Stats() (int64, int64, int64, int64, int64) {
-	if c3.remote != nil {
-		received, processed, dropped, queueSize, latency, err := c3.remote.stats()
+	if remote := c3.remoteClient(); remote != nil {
+		received, processed, dropped, queueSize, latency, err := remote.stats()
 		if err == nil {
 			return received, processed, dropped, queueSize, latency
 		}
@@ -143,8 +142,10 @@ func (c3 *Core3) GetWorldCache(path string) (SnapshotResult, error) {
 	if c3 == nil {
 		return SnapshotResult{}, fmt.Errorf("nil snapshot core")
 	}
-	if c3.remote != nil {
-		return c3.remote.getWorld(path)
+	if remote := c3.remoteClient(); remote != nil {
+		if res, err := remote.getWorld(path); err == nil {
+			return res, nil
+		}
 	}
 	if !c3.running.Load() {
 		return c3.getWorldCache(path)
@@ -161,8 +162,10 @@ func (c3 *Core3) InvalidateWorldCache(path string) error {
 	if c3 == nil {
 		return nil
 	}
-	if c3.remote != nil {
-		return c3.remote.invalidateWorld(path)
+	if remote := c3.remoteClient(); remote != nil {
+		if err := remote.invalidateWorld(path); err == nil {
+			return nil
+		}
 	}
 	if !c3.running.Load() {
 		return c3.invalidateWorldCache(path)
@@ -194,6 +197,8 @@ func (c3 *Core3) AttachRemote(client *ipcClient) {
 	if c3 == nil {
 		return
 	}
+	c3.remoteMu.Lock()
+	defer c3.remoteMu.Unlock()
 	if client == nil {
 		c3.remote = nil
 		return
@@ -201,18 +206,26 @@ func (c3 *Core3) AttachRemote(client *ipcClient) {
 	c3.remote = &remoteCore3Client{client: client}
 }
 
+func (c3 *Core3) remoteClient() *remoteCore3Client {
+	if c3 == nil {
+		return nil
+	}
+	c3.remoteMu.RLock()
+	defer c3.remoteMu.RUnlock()
+	return c3.remote
+}
+
 func (c3 *Core3) invalidateWorldCache(path string) error {
 	c3.cacheMu.Lock()
 	defer c3.cacheMu.Unlock()
-	if strings.TrimSpace(path) == "" {
-		c3.l1 = map[string]*snapshotCacheEntry{}
-		c3.l2 = map[string]*snapshotCacheEntry{}
-		c3.l3 = map[string]*snapshotCacheEntry{}
+	trimmed := strings.TrimSpace(path)
+	if trimmed == "" {
+		c3.entry = nil
 		return nil
 	}
-	delete(c3.l1, path)
-	delete(c3.l2, path)
-	delete(c3.l3, path)
+	if c3.entry != nil && c3.entry.path == trimmed {
+		c3.entry = nil
+	}
 	return nil
 }
 
@@ -227,42 +240,31 @@ func (c3 *Core3) getWorldCache(path string) (SnapshotResult, error) {
 	}
 	c3.cacheMu.Lock()
 	defer c3.cacheMu.Unlock()
-	if entry, level, ok := c3.lookupValidEntryLocked(path, info.ModTime()); ok {
+	if entry, ok := c3.lookupValidEntryLocked(path, info.ModTime()); ok {
 		entry.lastAccess = time.Now()
-		c3.promoteLocked(path, entry, level)
-		return snapshotResultFromEntry(entry, "L1"), nil
+		return snapshotResultFromEntry(entry, "active"), nil
 	}
 	entry, err := c3.loadEntryLocked(path, info.ModTime())
 	if err != nil {
 		return SnapshotResult{}, err
 	}
-	c3.l1[path] = entry
-	c3.rebalanceLocked()
-	return snapshotResultFromEntry(entry, "L1"), nil
+	c3.entry = entry
+	return snapshotResultFromEntry(entry, "active"), nil
 }
 
-func (c3 *Core3) lookupValidEntryLocked(path string, modTime time.Time) (*snapshotCacheEntry, string, bool) {
-	check := func(store map[string]*snapshotCacheEntry, level string) (*snapshotCacheEntry, string, bool) {
-		entry, ok := store[path]
-		if !ok || entry == nil {
-			return nil, "", false
-		}
-		if !entry.modTime.Equal(modTime) {
-			delete(store, path)
-			return nil, "", false
-		}
-		return entry, level, true
+func (c3 *Core3) lookupValidEntryLocked(path string, modTime time.Time) (*snapshotCacheEntry, bool) {
+	entry := c3.entry
+	if entry == nil {
+		return nil, false
 	}
-	if entry, level, ok := check(c3.l1, "L1"); ok {
-		return entry, level, true
+	if entry.path != path {
+		return nil, false
 	}
-	if entry, level, ok := check(c3.l2, "L2"); ok {
-		return entry, level, true
+	if !entry.modTime.Equal(modTime) {
+		c3.entry = nil
+		return nil, false
 	}
-	if entry, level, ok := check(c3.l3, "L3"); ok {
-		return entry, level, true
-	}
-	return nil, "", false
+	return entry, true
 }
 
 func (c3 *Core3) loadEntryLocked(path string, modTime time.Time) (*snapshotCacheEntry, error) {
@@ -278,8 +280,10 @@ func (c3 *Core3) loadEntryLocked(path string, modTime time.Time) (*snapshotCache
 	}
 	lower := strings.ToLower(path)
 	if strings.HasSuffix(lower, ".msav") || strings.HasSuffix(lower, ".msav.msav") {
-		if model, merr := worldstream.LoadWorldModelFromMSAV(path, nil); merr == nil {
-			entry.baseModel = model
+		if c3.cacheBaseModel {
+			if model, merr := worldstream.LoadWorldModelFromMSAV(path, nil); merr == nil {
+				entry.baseModel = model
+			}
 		}
 		if pos, ok, perr := worldstream.FindCoreTileFromMSAV(path); perr == nil {
 			entry.corePos = pos
@@ -309,46 +313,4 @@ func snapshotResultFromEntry(entry *snapshotCacheEntry, level string) SnapshotRe
 		Level:     level,
 	}
 	return res
-}
-
-func (c3 *Core3) promoteLocked(path string, entry *snapshotCacheEntry, level string) {
-	switch level {
-	case "L2":
-		delete(c3.l2, path)
-		c3.l1[path] = entry
-	case "L3":
-		delete(c3.l3, path)
-		c3.l1[path] = entry
-	}
-	c3.rebalanceLocked()
-}
-
-func (c3 *Core3) rebalanceLocked() {
-	rebalance := func(src map[string]*snapshotCacheEntry, srcCap int, dst map[string]*snapshotCacheEntry) {
-		for len(src) > srcCap {
-			var oldestKey string
-			var oldestTime time.Time
-			first := true
-			for key, entry := range src {
-				if entry == nil {
-					oldestKey = key
-					first = false
-					break
-				}
-				if first || entry.lastAccess.Before(oldestTime) {
-					oldestKey = key
-					oldestTime = entry.lastAccess
-					first = false
-				}
-			}
-			entry := src[oldestKey]
-			delete(src, oldestKey)
-			if dst != nil && entry != nil {
-				dst[oldestKey] = entry
-			}
-		}
-	}
-	rebalance(c3.l1, snapshotL1Capacity, c3.l2)
-	rebalance(c3.l2, snapshotL2Capacity, c3.l3)
-	rebalance(c3.l3, snapshotL3Capacity, nil)
 }

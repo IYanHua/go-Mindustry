@@ -5,6 +5,26 @@ import (
 	"testing"
 )
 
+func TestReaderNilReturnsEOFInsteadOfPanicking(t *testing.T) {
+	var nilReader *Reader
+	if got := nilReader.Remaining(); got != 0 {
+		t.Fatalf("expected nil reader remaining=0, got %d", got)
+	}
+	if _, err := nilReader.ReadByte(); err == nil {
+		t.Fatal("expected nil reader ReadByte to fail")
+	}
+	zeroReader := &Reader{}
+	if _, err := zeroReader.ReadBool(); err == nil {
+		t.Fatal("expected zero reader ReadBool to fail")
+	}
+	if _, err := zeroReader.ReadInt16(); err == nil {
+		t.Fatal("expected zero reader ReadInt16 to fail")
+	}
+	if _, err := zeroReader.ReadBytes(1); err == nil {
+		t.Fatal("expected zero reader ReadBytes to fail")
+	}
+}
+
 func TestReadObjectRejectsOversizedByteArray(t *testing.T) {
 	w := NewWriter()
 	if err := w.WriteByte(14); err != nil {

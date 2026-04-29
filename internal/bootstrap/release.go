@@ -20,8 +20,8 @@ func defaultReleasePolicy() releasePolicy {
 	}
 }
 
-func releaseINIPath(configDir string) string {
-	return filepath.Join(configDir, "release.toml")
+func releaseINIPath(stateDir string) string {
+	return filepath.Join(stateDir, "release.toml")
 }
 
 func parseReleaseINI(path string, p releasePolicy) (releasePolicy, error) {
@@ -91,13 +91,12 @@ released = %t
 	return os.WriteFile(path, []byte(content), 0o644)
 }
 
-func loadReleasePolicy(configDir string) (releasePolicy, error) {
+func loadReleasePolicy(stateDir string) (releasePolicy, error) {
 	p := defaultReleasePolicy()
-	path := releaseINIPath(configDir)
+	path := releaseINIPath(stateDir)
 	st, err := os.Stat(path)
 	if err != nil {
 		if os.IsNotExist(err) {
-			// 不在启动时自动生成 release.toml；应由程序包直接提供。
 			return p, nil
 		}
 		return p, err
@@ -112,9 +111,21 @@ func shouldReleaseEmbedded(p releasePolicy) bool {
 	return !p.Released
 }
 
-func markEmbeddedReleasedAt(configDir string, p releasePolicy) error {
+func markEmbeddedReleasedAt(stateDir string, p releasePolicy) error {
 	p.Released = true
-	return writeReleaseINI(releaseINIPath(configDir), p)
+	return writeReleaseINI(releaseINIPath(stateDir), p)
+}
+
+func EnsureStartupConfigTree(cfgPath string) error {
+	cfgPath = strings.TrimSpace(cfgPath)
+	if cfgPath == "" {
+		return nil
+	}
+	configDir := filepath.Dir(cfgPath)
+	if strings.TrimSpace(configDir) == "" {
+		configDir = "."
+	}
+	return releaseEmbeddedConfigs(configDir)
 }
 
 func releaseEmbeddedWorlds(worldsDir string) error {
@@ -145,6 +156,11 @@ func releaseEmbeddedWorlds(worldsDir string) error {
 		if err := os.MkdirAll(filepath.Dir(target), 0o755); err != nil {
 			return err
 		}
+		if st, statErr := os.Stat(target); statErr == nil && !st.IsDir() {
+			return nil
+		} else if statErr != nil && !os.IsNotExist(statErr) {
+			return statErr
+		}
 		return os.WriteFile(target, data, 0o644)
 	})
 }
@@ -165,13 +181,17 @@ func releaseEmbeddedConfigs(configDir string) error {
 			rel, _ := filepath.Rel("configs", path)
 			return os.MkdirAll(filepath.Join(configDir, rel), 0o755)
 		}
-		if strings.EqualFold(filepath.ToSlash(path), "configs/release.toml") {
+		slashPath := filepath.ToSlash(path)
+		if strings.EqualFold(slashPath, "configs/release.toml") {
 			return nil
 		}
 		ext := strings.ToLower(filepath.Ext(path))
-		isJSONConfig := strings.HasPrefix(filepath.ToSlash(path), "configs/json/")
-		isConfigDoc := strings.HasPrefix(filepath.ToSlash(path), "configs/")
-		if ext != ".toml" && !(isJSONConfig && ext == ".json") && !(isConfigDoc && ext == ".md") {
+		isConfigDoc := strings.HasPrefix(slashPath, "configs/")
+		isConfigJSON := strings.HasPrefix(slashPath, "configs/json/")
+		if isConfigJSON && strings.EqualFold(filepath.Base(path), "ops.json") {
+			return nil
+		}
+		if ext != ".toml" && !(isConfigDoc && ext == ".md") && !(isConfigJSON && ext == ".json") {
 			return nil
 		}
 		data, err := fs.ReadFile(mdtserver.BundledFiles, path)
@@ -182,6 +202,11 @@ func releaseEmbeddedConfigs(configDir string) error {
 		target := filepath.Join(configDir, rel)
 		if err := os.MkdirAll(filepath.Dir(target), 0o755); err != nil {
 			return err
+		}
+		if st, statErr := os.Stat(target); statErr == nil && !st.IsDir() {
+			return nil
+		} else if statErr != nil && !os.IsNotExist(statErr) {
+			return statErr
 		}
 		return os.WriteFile(target, data, 0o644)
 	})

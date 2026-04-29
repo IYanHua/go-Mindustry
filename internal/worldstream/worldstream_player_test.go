@@ -673,6 +673,55 @@ func TestBuildWorldStreamFromModelSnapshotPreservesInlineBuildingChunk(t *testin
 	}
 }
 
+func TestBuildWorldStreamFromModelSnapshotSynthesizesEntityChunkForDerelictBuild(t *testing.T) {
+	model := world.NewWorldModel(24, 24)
+	model.Content = []byte{0}
+	model.BlockNames = map[int16]string{
+		500: "container",
+	}
+	tile, err := model.TileAt(7, 7)
+	if err != nil || tile == nil {
+		t.Fatalf("tile lookup failed: %v", err)
+	}
+	tile.Block = 500
+	tile.Team = 0
+	tile.Rotation = 1
+	tile.Build = &world.Building{
+		Block:     500,
+		Team:      0,
+		Rotation:  1,
+		X:         7,
+		Y:         7,
+		Health:    87,
+		MaxHealth: 87,
+		Items:     []world.ItemStack{{Item: 0, Amount: 9}},
+	}
+
+	payload, err := BuildWorldStreamFromModelSnapshot(model, 11, world.Snapshot{Wave: 2, WaveTime: 3, Tick: 4})
+	if err != nil {
+		t.Fatalf("build world stream from model snapshot: %v", err)
+	}
+
+	_, _, mapChunk, _, _, _ := readWorldStreamCoreSections(t, payload, -1, -1, -1)
+	decoded, err := decodeMapChunk(mapChunk)
+	if err != nil {
+		t.Fatalf("decode map chunk: %v", err)
+	}
+	decodedTile, err := decoded.TileAt(7, 7)
+	if err != nil || decodedTile == nil || decodedTile.Build == nil {
+		t.Fatalf("decoded derelict container missing build entity: %v", err)
+	}
+	if decodedTile.Build.Team != 0 {
+		t.Fatalf("expected derelict build team 0, got %d", decodedTile.Build.Team)
+	}
+	if len(decodedTile.Build.Items) != 1 || decodedTile.Build.Items[0].Amount != 9 {
+		t.Fatalf("expected synthesized entity chunk to preserve item module, got %+v", decodedTile.Build.Items)
+	}
+	if len(decodedTile.Build.MapSyncData) == 0 {
+		t.Fatal("expected synthesized entity chunk to preserve non-empty inline sync bytes")
+	}
+}
+
 func TestBuildWorldStreamFromModelSnapshotPreservesPatchesAndCustom(t *testing.T) {
 	model := world.NewWorldModel(4, 4)
 	model.Content = []byte{0}

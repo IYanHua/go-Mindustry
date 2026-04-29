@@ -298,6 +298,11 @@ type BuildSyncState struct {
 	Health   float32
 }
 
+type BuildSyncSnapshotEntry struct {
+	BuildSyncState
+	Config []byte
+}
+
 type pendingBuildState struct {
 	Owner            int32
 	Team             TeamID
@@ -2137,7 +2142,7 @@ func (w *World) BuildingInfoPacked(pos int32) (BuildingInfo, bool) {
 	}
 
 	team := tile.Team
-	if tile.Build.Team != 0 {
+	if tile.Build != nil {
 		team = tile.Build.Team
 	}
 	return BuildingInfo{
@@ -2878,15 +2883,21 @@ func (w *World) restorePayloadStatesLocked() {
 	}
 }
 
-func decodePayloadData(data []byte) (*payloadData, bool) {
+func decodePayloadData(data []byte) (out *payloadData, ok bool) {
 	if len(data) == 0 {
 		return nil, false
 	}
+	defer func() {
+		if recover() != nil {
+			out = nil
+			ok = false
+		}
+	}()
 	decoded, err := protocol.ReadPayload(protocol.NewReader(data), nil)
 	if err != nil {
 		return nil, false
 	}
-	out := &payloadData{
+	out = &payloadData{
 		UnitTypeID: -1,
 		Serialized: append([]byte(nil), data...),
 	}
@@ -3854,7 +3865,16 @@ func (w *World) stackConveyorAcceptsItemLocked(fromPos, toPos int32, item ItemID
 		return false
 	}
 	st := w.stackStateLocked(toPos, toTile)
+	if fromPos == toPos {
+		if totalBuildingItems(toTile.Build) >= w.itemCapacityForBlockLocked(toTile) {
+			return false
+		}
+		return !st.HasItem || st.LastItem == item
+	}
 	if st.Cooldown > 1 {
+		return false
+	}
+	if !w.stackConveyorIsLoadingStateLocked(toPos, toTile) {
 		return false
 	}
 	if totalBuildingItems(toTile.Build) >= w.itemCapacityForBlockLocked(toTile) {
@@ -3884,6 +3904,88 @@ func (w *World) stackConveyorHandleItemLocked(fromPos, toPos int32, item ItemID)
 		st.Link = toPos
 	}
 	return true
+}
+
+func (w *World) stackConveyorHasFrontStackLocked(pos int32, tile *Tile) (int32, *Tile, bool) {
+	if w == nil || w.model == nil || tile == nil {
+		return 0, nil, false
+	}
+	frontPos, ok := w.forwardPosLocked(pos, tile.Rotation)
+	if !ok || frontPos < 0 || int(frontPos) >= len(w.model.Tiles) {
+		return 0, nil, false
+	}
+	frontTile := &w.model.Tiles[frontPos]
+	if frontTile.Build == nil || frontTile.Team != tile.Team || !isStackConveyorBlock(w.blockNameByID(int16(frontTile.Block))) {
+		return 0, nil, false
+	}
+	return frontPos, frontTile, true
+}
+
+func (w *World) stackConveyorHasBackStackLocked(pos int32, tile *Tile) (int32, *Tile, bool) {
+	if w == nil || w.model == nil || tile == nil {
+		return 0, nil, false
+	}
+	backPos, ok := w.forwardPosLocked(pos, int8((int(tile.Rotation)+2)%4))
+	if !ok || backPos < 0 || int(backPos) >= len(w.model.Tiles) {
+		return 0, nil, false
+	}
+	backTile := &w.model.Tiles[backPos]
+	if backTile.Build == nil || backTile.Team != tile.Team || !isStackConveyorBlock(w.blockNameByID(int16(backTile.Block))) {
+		return 0, nil, false
+	}
+	return backPos, backTile, true
+}
+
+func (w *World) stackConveyorIsUnloadingStateLocked(pos int32, tile *Tile) bool {
+	if w == nil || tile == nil || tile.Build == nil || tile.Block == 0 {
+		return false
+	}
+	name := w.blockNameByID(int16(tile.Block))
+	if !isStackConveyorBlock(name) {
+		return false
+	}
+	_, _, hasFrontStack := w.stackConveyorHasFrontStackLocked(pos, tile)
+	if name == "plastanium-conveyor" {
+		_, _, hasBackStack := w.stackConveyorHasBackStackLocked(pos, tile)
+		return !hasFrontStack && hasBackStack
+	}
+	return !hasFrontStack
+}
+
+func (w *World) stackConveyorIsLoadingStateLocked(pos int32, tile *Tile) bool {
+	if w == nil || tile == nil || tile.Build == nil || tile.Block == 0 {
+		return false
+	}
+	name := w.blockNameByID(int16(tile.Block))
+	if !isStackConveyorBlock(name) {
+		return false
+	}
+	_, _, hasFrontStack := w.stackConveyorHasFrontStackLocked(pos, tile)
+	if !hasFrontStack {
+		return false
+	}
+	backPos, backTile, hasBackStack := w.stackConveyorHasBackStackLocked(pos, tile)
+	loading := !hasBackStack || w.stackConveyorIsUnloadingStateLocked(backPos, backTile)
+	if !loading {
+		return false
+	}
+	for _, otherPos := range w.dumpProximityLocked(pos) {
+		if otherPos < 0 || int(otherPos) >= len(w.model.Tiles) || otherPos == pos {
+			continue
+		}
+		other := &w.model.Tiles[otherPos]
+		if other.Build == nil || other.Team != tile.Team || !isStackConveyorBlock(w.blockNameByID(int16(other.Block))) {
+			continue
+		}
+		if nextPos, ok := w.forwardPosLocked(otherPos, other.Rotation); ok && nextPos == pos {
+			return false
+		}
+	}
+	return true
+}
+
+func (w *World) stackConveyorCanUnloadLocked(pos int32, tile *Tile) bool {
+	return !w.stackConveyorIsLoadingStateLocked(pos, tile)
 }
 
 func tileRotationNorm(rotation int8) int {
@@ -5263,6 +5365,11 @@ func (w *World) stepOverflowDuctLocked(pos int32, tile *Tile, speed float32, inv
 	if !w.removeItemAtLocked(pos, st.Current, 1) {
 		return
 	}
+	if w.blockDumpIndex[pos] == 0 {
+		w.blockDumpIndex[pos] = 2
+	} else {
+		w.blockDumpIndex[pos] = 0
+	}
 	st.HasItem = false
 	st.Progress = float32(math.Mod(float64(st.Progress), float64(threshold)))
 	if item, ok := firstBuildingItem(tile.Build); ok {
@@ -5321,25 +5428,24 @@ func (w *World) stepDirectionalUnloaderLocked(pos int32, tile *Tile, speed float
 	if w.transportAccum[pos] < speed {
 		return
 	}
+	// Vanilla DirectionalUnloader consumes the cooldown window as soon as it
+	// attempts an unload pass, even if no item actually moved.
+	w.transportAccum[pos] = float32(math.Mod(float64(w.transportAccum[pos]), float64(speed)))
 	frontPos, fok := w.forwardItemTargetPosLocked(pos, tile.Rotation)
 	backPos, bok := w.forwardItemTargetPosLocked(pos, int8((int(tile.Rotation)+2)%4))
 	if !fok || !bok {
-		w.transportAccum[pos] = minf(w.transportAccum[pos], speed)
 		return
 	}
 	frontTile := &w.model.Tiles[frontPos]
 	backTile := &w.model.Tiles[backPos]
 	if frontTile.Build == nil || backTile.Build == nil || frontTile.Team != tile.Team || backTile.Team != tile.Team {
-		w.transportAccum[pos] = minf(w.transportAccum[pos], speed)
 		return
 	}
-	backName := w.blockNameByID(int16(backTile.Block))
-	if strings.HasPrefix(backName, "core-") {
-		w.transportAccum[pos] = minf(w.transportAccum[pos], speed)
+	if _, _, _, ok := w.sharedCoreInventoryLocked(backPos); ok {
 		return
 	}
 	tryMove := func(item ItemID) bool {
-		if backTile.Build.ItemAmount(item) <= 0 {
+		if !w.canUnloadItemFromBuildingLocked(backPos, backTile, item, false) {
 			return false
 		}
 		if !w.tryInsertItemLocked(pos, frontPos, item, 0) {
@@ -5349,13 +5455,10 @@ func (w *World) stepDirectionalUnloaderLocked(pos int32, tile *Tile, speed float
 			_ = frontTile.Build.RemoveItem(item, 1)
 			return false
 		}
-		w.transportAccum[pos] = float32(math.Mod(float64(w.transportAccum[pos]), float64(speed)))
 		return true
 	}
 	if item, ok := w.unloaderCfg[pos]; ok {
-		if !tryMove(item) {
-			w.transportAccum[pos] = minf(w.transportAccum[pos], speed)
-		}
+		_ = tryMove(item)
 		return
 	}
 	for _, item := range w.rotatedInventoryItemIDsLocked(backPos, w.blockDumpIndex[pos]) {
@@ -5364,7 +5467,6 @@ func (w *World) stepDirectionalUnloaderLocked(pos int32, tile *Tile, speed float
 			return
 		}
 	}
-	w.transportAccum[pos] = minf(w.transportAccum[pos], speed)
 }
 
 func (w *World) stepStackConveyorLocked(pos int32, tile *Tile, speed float32, recharge float32, outputRouter bool, dt float32) {
@@ -6266,6 +6368,14 @@ func affectsCoreStorageLinks(name string) bool {
 	return isCoreBlockName(name) || isCoreMergeStorageBlock(name)
 }
 
+func (w *World) allowCoreUnloadersLocked() bool {
+	if w == nil || w.rulesMgr == nil {
+		return true
+	}
+	rules := w.rulesMgr.Get()
+	return rules == nil || rules.AllowCoreUnloaders
+}
+
 func normalizeItemStackMap(items map[ItemID]int32, maxPerItem int32) []ItemStack {
 	if len(items) == 0 {
 		return nil
@@ -6444,6 +6554,34 @@ func (w *World) sharedCoreInventoryLocked(pos int32) (TeamID, int32, *Building, 
 		capacity = w.itemCapacityForBlockLocked(proxyTile)
 	}
 	return proxyTile.Team, proxyPos, proxyTile.Build, true
+}
+
+func (w *World) canUnloadItemFromBuildingLocked(pos int32, tile *Tile, item ItemID, allowCoreUnload bool) bool {
+	if w == nil || tile == nil || tile.Build == nil || tile.Block == 0 {
+		return false
+	}
+	name := w.blockNameByID(int16(tile.Block))
+	if isStackConveyorBlock(name) {
+		if !w.stackConveyorCanUnloadLocked(pos, tile) {
+			return false
+		}
+		return w.itemAmountAtLocked(pos, item) > 0
+	}
+	switch name {
+	case "conveyor", "titanium-conveyor", "armored-conveyor",
+		"duct", "armored-duct", "duct-junction", "duct-router",
+		"junction", "bridge-conveyor", "phase-conveyor",
+		"overflow-duct", "underflow-duct", "overflow-gate", "underflow-gate",
+		"router", "distributor", "sorter", "inverted-sorter",
+		"unloader", "duct-unloader":
+		return false
+	}
+	if _, _, _, ok := w.sharedCoreInventoryLocked(pos); ok {
+		if !allowCoreUnload || !w.allowCoreUnloadersLocked() {
+			return false
+		}
+	}
+	return w.itemAmountAtLocked(pos, item) > 0
 }
 
 func (w *World) itemCapacityAtLocked(pos int32) int32 {
@@ -6687,7 +6825,7 @@ func (w *World) unloaderTransferPairInternalLocked(pos int32, neighbors []int32,
 
 		notStorage := !isStorageLikeBlock(w.blockNameByID(int16(other.Block)))
 		canLoad := notStorage && w.canAcceptItemLocked(pos, otherPos, item, 0)
-		canUnload := w.itemAmountAtLocked(otherPos, item) > 0
+		canUnload := w.canUnloadItemFromBuildingLocked(otherPos, other, item, true)
 		if !canLoad && !canUnload {
 			continue
 		}
@@ -7025,6 +7163,7 @@ func (w *World) overflowDuctTargetLocked(pos int32, tile *Tile, item ItemID, inv
 	if w.model == nil || tile == nil {
 		return 0, false
 	}
+	useLeft := w.blockDumpIndex[pos] == 0
 	tryDir := func(dir byte) (int32, bool) {
 		target, ok := w.forwardItemTargetPosLocked(pos, int8(dir))
 		if !ok {
@@ -7047,11 +7186,9 @@ func (w *World) overflowDuctTargetLocked(pos int32, tile *Tile, item ItemID, inv
 			return right, true
 		}
 		if lok && rok {
-			if w.blockDumpIndex[pos]%2 == 0 {
-				w.blockDumpIndex[pos] = 1
+			if useLeft {
 				return left, true
 			}
-			w.blockDumpIndex[pos] = 0
 			return right, true
 		}
 		return 0, false
@@ -7068,11 +7205,9 @@ func (w *World) overflowDuctTargetLocked(pos int32, tile *Tile, item ItemID, inv
 		return right, true
 	}
 	if lok && rok {
-		if w.blockDumpIndex[pos]%2 == 0 {
-			w.blockDumpIndex[pos] = 1
+		if useLeft {
 			return left, true
 		}
-		w.blockDumpIndex[pos] = 0
 		return right, true
 	}
 	return 0, false
@@ -9232,6 +9367,18 @@ func (w *World) Bounds() (int, int, bool) {
 	return w.model.Width, w.model.Height, true
 }
 
+func (w *World) RulesTagRaw() string {
+	if w == nil {
+		return ""
+	}
+	w.mu.RLock()
+	defer w.mu.RUnlock()
+	if w.model == nil || w.model.Tags == nil {
+		return ""
+	}
+	return strings.TrimSpace(w.model.Tags["rules"])
+}
+
 func (w *World) CloneModel() *WorldModel {
 	w.mu.RLock()
 	defer w.mu.RUnlock()
@@ -9644,7 +9791,7 @@ func (w *World) BuildSyncSnapshot() []BuildSyncState {
 			hp = t.Build.Health
 		}
 		team := t.Team
-		if t.Build != nil && t.Build.Team != 0 {
+		if t.Build != nil {
 			team = t.Build.Team
 		}
 		out = append(out, BuildSyncState{
@@ -9656,6 +9803,51 @@ func (w *World) BuildSyncSnapshot() []BuildSyncState {
 			Rotation: t.Rotation,
 			Health:   hp,
 		})
+	}
+	return out
+}
+
+func (w *World) BuildSyncSnapshotWithConfig() []BuildSyncSnapshotEntry {
+	w.mu.RLock()
+	defer w.mu.RUnlock()
+	if w.model == nil || len(w.model.Tiles) == 0 {
+		return nil
+	}
+	out := make([]BuildSyncSnapshotEntry, 0, len(w.activeTilePositions))
+	for _, pos := range w.activeTilePositions {
+		if pos < 0 || int(pos) >= len(w.model.Tiles) {
+			continue
+		}
+		if w.blockSyncSuppressedLocked(pos) {
+			continue
+		}
+		t := w.model.Tiles[pos]
+		if !isCenterBuildingTile(&t) {
+			continue
+		}
+		hp := float32(1000)
+		if t.Build != nil && t.Build.Health > 0 {
+			hp = t.Build.Health
+		}
+		team := t.Team
+		if t.Build != nil {
+			team = t.Build.Team
+		}
+		entry := BuildSyncSnapshotEntry{
+			BuildSyncState: BuildSyncState{
+				Pos:      packTilePos(t.X, t.Y),
+				X:        int32(t.X),
+				Y:        int32(t.Y),
+				BlockID:  int16(t.Block),
+				Team:     team,
+				Rotation: t.Rotation,
+				Health:   hp,
+			},
+		}
+		if t.Build != nil && len(t.Build.Config) > 0 {
+			entry.Config = append([]byte(nil), t.Build.Config...)
+		}
+		out = append(out, entry)
 	}
 	return out
 }

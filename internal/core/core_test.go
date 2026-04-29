@@ -1,8 +1,10 @@
 package core
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -169,6 +171,65 @@ func TestCore2PacketHandlersRecordEventsWhenVerbose(t *testing.T) {
 	}
 }
 
+func TestServerCoreUnexpectedChildExitDetachesRemoteAndNotifies(t *testing.T) {
+	sc := NewServerCore(time.Second/60, Config{Name: "test", MessageBuf: 4, WorkerCount: 1}, config.PersistConfig{})
+	sc.Core2.AttachRemote(&ipcClient{})
+	sc.Core3.AttachRemote(&ipcClient{})
+	sc.Core4.AttachRemote(&ipcClient{})
+
+	var called atomic.Int32
+	sc.SetChildExitHandler(func(role string, err error) {
+		if role != "core3" {
+			t.Fatalf("unexpected role: %s", role)
+		}
+		if err == nil || err.Error() != "boom" {
+			t.Fatalf("unexpected err: %v", err)
+		}
+		called.Add(1)
+	})
+
+	sc.handleUnexpectedChildExit("core3", errors.New("boom"))
+
+	if sc.Core3.remoteClient() != nil {
+		t.Fatal("expected core3 remote to be detached")
+	}
+	if !sc.Core2.HasRemote() {
+		t.Fatal("expected unrelated core2 remote to remain attached")
+	}
+	if got := called.Load(); got != 1 {
+		t.Fatalf("expected child exit handler to run once, got %d", got)
+	}
+}
+
+func TestCore3ConcurrentRemoteAttachDetachAccess(t *testing.T) {
+	c3 := NewCore3(Config{Name: "test", MessageBuf: 4, WorkerCount: 1})
+	missingPath := filepath.Join(t.TempDir(), "missing.msav")
+
+	var wg sync.WaitGroup
+	for i := 0; i < 4; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for j := 0; j < 200; j++ {
+				_, _ = c3.GetWorldCache(missingPath)
+				_ = c3.InvalidateWorldCache(missingPath)
+				_, _, _, _, _ = c3.Stats()
+			}
+		}()
+	}
+
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		for i := 0; i < 400; i++ {
+			c3.AttachRemote(&ipcClient{})
+			c3.AttachRemote(nil)
+		}
+	}()
+
+	wg.Wait()
+}
+
 func TestCore2SaveLoadWorld(t *testing.T) {
 	c2 := NewCore2(Config{Name: "test", MessageBuf: 4, WorkerCount: 1})
 	dir := t.TempDir()
@@ -319,14 +380,8 @@ func TestCore3WorldCacheProvidesAndInvalidatesCachedPayload(t *testing.T) {
 	if err := c3.InvalidateWorldCache(path); err != nil {
 		t.Fatalf("InvalidateWorldCache: %v", err)
 	}
-	if _, ok := c3.l1[path]; ok {
-		t.Fatal("expected invalidated path to be removed from L1")
-	}
-	if _, ok := c3.l2[path]; ok {
-		t.Fatal("expected invalidated path to be removed from L2")
-	}
-	if _, ok := c3.l3[path]; ok {
-		t.Fatal("expected invalidated path not to remain in caches")
+	if c3.entry != nil {
+		t.Fatal("expected invalidated path not to remain in active cache")
 	}
 }
 

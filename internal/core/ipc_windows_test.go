@@ -3,12 +3,16 @@
 package core
 
 import (
+	"encoding/json"
 	"fmt"
 	"net"
 	"os"
 	"path/filepath"
 	"testing"
 	"time"
+
+	"mdt-server/internal/config"
+	"mdt-server/internal/persist"
 )
 
 func waitForIPCConn(t *testing.T, endpoint string, done <-chan error) net.Conn {
@@ -84,6 +88,72 @@ func TestRemoteCore3WorldCacheRoundTrip(t *testing.T) {
 		}
 	case <-time.After(2 * time.Second):
 		t.Fatal("timeout waiting for core3 child shutdown")
+	}
+}
+
+func TestRemoteCore2PersistenceRoundTrip(t *testing.T) {
+	persistCfg := config.PersistConfig{
+		Enabled:   true,
+		Directory: filepath.Join(t.TempDir(), "state"),
+		File:      "server-state.json",
+	}
+
+	endpoint := normalizeIPCEndpoint(fmt.Sprintf("mdt-server-test-core2-%d", time.Now().UnixNano()))
+	done := make(chan error, 1)
+	go func() {
+		done <- RunChildCore("core2", endpoint, 0, persistCfg)
+	}()
+
+	conn := waitForIPCConn(t, endpoint, done)
+	defer conn.Close()
+
+	c2 := NewCore2(Config{Name: "remote-core2"})
+	c2.AttachRemote(newIPCClient(conn))
+
+	state := persist.State{
+		MapPath: "assets/worlds/file.msav",
+		Wave:    7,
+		Tick:    42,
+	}
+	stateData, err := json.Marshal(state)
+	if err != nil {
+		t.Fatalf("marshal state: %v", err)
+	}
+	ch := make(chan PersistenceResult, 1)
+	if !c2.Send(&PersistenceMessage{
+		Action:     "save_state",
+		Path:       state.MapPath,
+		StateData:  stateData,
+		ResultChan: ch,
+	}) {
+		t.Fatal("expected remote core2 save_state enqueue to succeed")
+	}
+	res := <-ch
+	if res.Error != nil {
+		t.Fatalf("remote save_state: %v", res.Error)
+	}
+
+	loaded, ok, err := persist.Load(persistCfg)
+	if err != nil {
+		t.Fatalf("load persisted state: %v", err)
+	}
+	if !ok {
+		t.Fatal("expected persisted state file to exist")
+	}
+	if loaded.Wave != state.Wave || loaded.Tick != state.Tick || loaded.MapPath != state.MapPath {
+		t.Fatalf("unexpected persisted state: %+v", loaded)
+	}
+
+	if err := c2.remote.client.Call("shutdown", nil, nil); err != nil {
+		t.Fatalf("shutdown core2 child: %v", err)
+	}
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("core2 child exited with error: %v", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("timeout waiting for core2 child shutdown")
 	}
 }
 

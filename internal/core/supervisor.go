@@ -8,11 +8,13 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"mdt-server/internal/protocol"
 )
 
+const core2IPCTimeout = 5 * time.Second
 const policyIPCTimeout = 250 * time.Millisecond
 
 type childCoreProcess struct {
@@ -20,27 +22,71 @@ type childCoreProcess struct {
 	Endpoint string
 	Cmd      *exec.Cmd
 	Client   *ipcClient
+
+	exitCh    chan error
+	closeOnce sync.Once
+	closing   atomic.Bool
 }
 
 func (p *childCoreProcess) Close() error {
 	if p == nil {
 		return nil
 	}
-	if p.Client != nil {
-		_ = p.Client.Call("shutdown", nil, nil)
-		_ = p.Client.Close()
-	}
-	if p.Cmd != nil && p.Cmd.Process != nil {
-		done := make(chan error, 1)
-		go func() { done <- p.Cmd.Wait() }()
+	var closeErr error
+	p.closeOnce.Do(func() {
+		p.closing.Store(true)
+		if p.Client != nil {
+			_ = p.Client.Call("shutdown", nil, nil)
+			_ = p.Client.Close()
+		}
+		if p.Cmd == nil || p.Cmd.Process == nil {
+			return
+		}
+		waitCh := p.Exited()
 		select {
+		case err, ok := <-waitCh:
+			if ok {
+				closeErr = err
+			}
 		case <-time.After(2 * time.Second):
 			_ = p.Cmd.Process.Kill()
-			<-done
-		case <-done:
+			if err, ok := <-waitCh; ok {
+				closeErr = err
+			}
 		}
+	})
+	return closeErr
+}
+
+func (p *childCoreProcess) beginWait() {
+	if p == nil || p.exitCh != nil || p.Cmd == nil {
+		return
 	}
-	return nil
+	p.exitCh = make(chan error, 1)
+	go func() {
+		err := p.Cmd.Wait()
+		p.exitCh <- err
+		close(p.exitCh)
+	}()
+}
+
+func (p *childCoreProcess) Exited() <-chan error {
+	if p == nil {
+		ch := make(chan error)
+		close(ch)
+		return ch
+	}
+	if p.exitCh == nil {
+		p.beginWait()
+	}
+	return p.exitCh
+}
+
+func (p *childCoreProcess) Closing() bool {
+	if p == nil {
+		return true
+	}
+	return p.closing.Load()
 }
 
 func spawnChildCoreProcess(exePath, role string, extraArgs ...string) (*childCoreProcess, error) {
@@ -72,12 +118,14 @@ func spawnChildCoreProcess(exePath, role string, extraArgs ...string) (*childCor
 			client := newIPCClient(c)
 			var pong map[string]any
 			if err := client.Call("ping", nil, &pong); err == nil {
-				return &childCoreProcess{
+				child := &childCoreProcess{
 					Role:     role,
 					Endpoint: endpoint,
 					Cmd:      cmd,
 					Client:   client,
-				}, nil
+				}
+				child.beginWait()
+				return child, nil
 			}
 			_ = c.Close()
 			ipcConnErr = err
@@ -102,6 +150,54 @@ func executablePath() (string, error) {
 	return filepath.Clean(exe), nil
 }
 
+type remoteCore2Client struct {
+	client *ipcClient
+}
+
+func (r *remoteCore2Client) persistence(req ipcCore2PersistenceRequest) (PersistenceResult, error) {
+	if r == nil || r.client == nil {
+		return PersistenceResult{}, fmt.Errorf("remote core2 client not ready")
+	}
+	var resp ipcCore2PersistenceResponse
+	if err := r.client.CallWithTimeout("core2."+req.Action, req, &resp, core2IPCTimeout); err != nil {
+		return PersistenceResult{}, err
+	}
+	return PersistenceResult{
+		StateData: resp.StateData,
+		WorldData: resp.WorldData,
+	}, nil
+}
+
+func (r *remoteCore2Client) worldStream(req ipcCore2WorldStreamRequest) error {
+	if r == nil || r.client == nil {
+		return fmt.Errorf("remote core2 client not ready")
+	}
+	var resp map[string]any
+	return r.client.CallWithTimeout("core2."+req.Action, req, &resp, core2IPCTimeout)
+}
+
+func (r *remoteCore2Client) rewriteWorldStream(req ipcCore2WorldStreamRequest) ([]byte, error) {
+	if r == nil || r.client == nil {
+		return nil, fmt.Errorf("remote core2 client not ready")
+	}
+	var resp ipcCore2WorldStreamResponse
+	if err := r.client.CallWithTimeout("core2.rewrite_worldstream", req, &resp, core2IPCTimeout); err != nil {
+		return nil, err
+	}
+	return resp.Data, nil
+}
+
+func (r *remoteCore2Client) stats() (int64, int64, int64, int64, int64, error) {
+	if r == nil || r.client == nil {
+		return 0, 0, 0, 0, 0, fmt.Errorf("remote core2 client not ready")
+	}
+	var resp ipcStatsResponse
+	if err := r.client.Call("stats", nil, &resp); err != nil {
+		return 0, 0, 0, 0, 0, err
+	}
+	return resp.Received, resp.Processed, resp.Dropped, resp.QueueSize, resp.LatencyMs, nil
+}
+
 type remoteCore3Client struct {
 	client *ipcClient
 }
@@ -111,11 +207,15 @@ func (r *remoteCore3Client) getWorld(path string) (SnapshotResult, error) {
 		return SnapshotResult{}, fmt.Errorf("remote core3 client not ready")
 	}
 	var resp ipcWorldCacheResponse
-	if err := r.client.Call("core3.get_world", ipcWorldCacheRequest{Path: path}, &resp); err != nil {
+	if err := r.client.CallWithTimeout("core3.get_world", ipcWorldCacheRequest{Path: path}, &resp, core2IPCTimeout); err != nil {
 		return SnapshotResult{}, err
 	}
+	// Keep a dedicated copy on the parent side. The world cache payload is large,
+	// but the extra copy is preferable to risking reused/corrupted backing memory
+	// on the long-lived Windows IPC path during connect-time world fetches.
+	data := append([]byte(nil), resp.Data...)
 	return SnapshotResult{
-		Data:      resp.Data,
+		Data:      data,
 		CorePos:   protocol.Point2{X: resp.CorePosX, Y: resp.CorePosY},
 		CorePosOK: resp.CorePosOK,
 		Level:     resp.Level,
@@ -127,7 +227,7 @@ func (r *remoteCore3Client) invalidateWorld(path string) error {
 		return fmt.Errorf("remote core3 client not ready")
 	}
 	var resp map[string]any
-	return r.client.Call("core3.invalidate_world", ipcInvalidateWorldRequest{Path: path}, &resp)
+	return r.client.CallWithTimeout("core3.invalidate_world", ipcInvalidateWorldRequest{Path: path}, &resp, core2IPCTimeout)
 }
 
 func (r *remoteCore3Client) stats() (int64, int64, int64, int64, int64, error) {
@@ -135,7 +235,7 @@ func (r *remoteCore3Client) stats() (int64, int64, int64, int64, int64, error) {
 		return 0, 0, 0, 0, 0, fmt.Errorf("remote core3 client not ready")
 	}
 	var resp ipcStatsResponse
-	if err := r.client.Call("stats", nil, &resp); err != nil {
+	if err := r.client.CallWithTimeout("stats", nil, &resp, core2IPCTimeout); err != nil {
 		return 0, 0, 0, 0, 0, err
 	}
 	return resp.Received, resp.Processed, resp.Dropped, resp.QueueSize, resp.LatencyMs, nil
@@ -196,22 +296,52 @@ func (r *remoteCore4Client) stats() (int64, int64, int64, int64, int64, error) {
 }
 
 type coreSupervisor struct {
-	mu       sync.Mutex
-	children map[string]*childCoreProcess
+	mu               sync.Mutex
+	children         map[string]*childCoreProcess
+	closed           bool
+	unexpectedExitFn func(role string, err error)
 }
 
 func newCoreSupervisor() *coreSupervisor {
 	return &coreSupervisor{children: map[string]*childCoreProcess{}}
 }
 
+func (s *coreSupervisor) setUnexpectedExitHandler(fn func(role string, err error)) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.unexpectedExitFn = fn
+}
+
 func (s *coreSupervisor) add(role string, child *childCoreProcess) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.children[role] = child
+	go s.watchChild(role, child)
+}
+
+func (s *coreSupervisor) watchChild(role string, child *childCoreProcess) {
+	if s == nil || child == nil {
+		return
+	}
+	var exitErr error
+	if err, ok := <-child.Exited(); ok {
+		exitErr = err
+	}
+	s.mu.Lock()
+	if existing, ok := s.children[role]; ok && existing == child {
+		delete(s.children, role)
+	}
+	closed := s.closed || child.Closing()
+	handler := s.unexpectedExitFn
+	s.mu.Unlock()
+	if !closed && handler != nil {
+		handler(role, exitErr)
+	}
 }
 
 func (s *coreSupervisor) closeAll() {
 	s.mu.Lock()
+	s.closed = true
 	children := make([]*childCoreProcess, 0, len(s.children))
 	for _, child := range s.children {
 		children = append(children, child)

@@ -766,6 +766,30 @@ func hydrateInlineBuildingConfigs(model *world.WorldModel) {
 					build.Config = cfg
 				}
 			}
+		case "item-source",
+			"sorter",
+			"inverted-sorter",
+			"duct-router",
+			"surge-router",
+			"unloader",
+			"duct-unloader":
+			if itemID, ok := decodeLeadingConfigInt16(build.MapSyncTail); ok {
+				if cfg, ok := encodeConfigObject(protocol.ItemRef{ItmID: itemID}); ok {
+					build.Config = cfg
+				}
+			}
+		case "liquid-source":
+			if liquidID, ok := decodeLeadingConfigInt16(build.MapSyncTail); ok {
+				if cfg, ok := encodeConfigObject(configContentRef{typ: protocol.ContentLiquid, id: liquidID}); ok {
+					build.Config = cfg
+				}
+			}
+		case "payload-router", "reinforced-payload-router":
+			if content, ok := decodeLeadingPayloadContent(build.MapSyncTail); ok {
+				if cfg, ok := encodeConfigObject(content); ok {
+					build.Config = cfg
+				}
+			}
 		}
 	}
 }
@@ -779,6 +803,47 @@ func decodeLeadingPackedLink(tail []byte) (int32, bool) {
 		return 0, false
 	}
 	return value, true
+}
+
+func decodeLeadingConfigInt16(tail []byte) (int16, bool) {
+	if len(tail) < 2 {
+		return 0, false
+	}
+	value, err := newJavaReader(tail).ReadInt16()
+	if err != nil || value < 0 {
+		return 0, false
+	}
+	return value, true
+}
+
+type configContentRef struct {
+	typ protocol.ContentType
+	id  int16
+}
+
+func (c configContentRef) ContentType() protocol.ContentType { return c.typ }
+func (c configContentRef) ID() int16                         { return c.id }
+func (c configContentRef) Name() string                      { return "" }
+
+func decodeLeadingPayloadContent(tail []byte) (protocol.Content, bool) {
+	if len(tail) < 3 {
+		return nil, false
+	}
+	r := newJavaReader(tail)
+	ctypeRaw, err := r.ReadByte()
+	if err != nil {
+		return nil, false
+	}
+	contentID, err := r.ReadInt16()
+	if err != nil || contentID < 0 {
+		return nil, false
+	}
+	switch ctype := protocol.ContentType(int8(ctypeRaw)); ctype {
+	case protocol.ContentBlock, protocol.ContentUnit:
+		return configContentRef{typ: ctype, id: contentID}, true
+	default:
+		return nil, false
+	}
 }
 
 func encodePointConfigFromPackedLink(model *world.WorldModel, srcX, srcY int, packed int32) ([]byte, bool) {

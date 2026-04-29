@@ -365,7 +365,7 @@ func TestBuildInitialWorldDataPayloadPrefersLiveModelSnapshotForInitialJoin(t *t
 	defer conn.Close()
 	conn.SetLiveWorldStream(true)
 
-	payload, err := buildInitialWorldDataPayload(conn, w, cache, path)
+	payload, err := buildInitialWorldDataPayload(conn, w, cache, path, nil)
 	if err != nil {
 		t.Fatalf("build initial world payload: %v", err)
 	}
@@ -430,7 +430,7 @@ func TestBuildInitialWorldDataPayloadPrefersLiveModelSnapshotWithBundledMap(t *t
 	conn := netserver.NewConn(serverSide, srv.Serial)
 	defer conn.Close()
 
-	payload, err := buildInitialWorldDataPayload(conn, w, cache, path)
+	payload, err := buildInitialWorldDataPayload(conn, w, cache, path, nil)
 	if err != nil {
 		t.Fatalf("build initial world payload: %v", err)
 	}
@@ -470,7 +470,7 @@ func TestBuildInitialWorldDataPayloadFallsBackToBaseWorldStreamWithoutWorld(t *t
 	conn := netserver.NewConn(serverSide, srv.Serial)
 	defer conn.Close()
 
-	payload, err := buildInitialWorldDataPayload(conn, nil, cache, path)
+	payload, err := buildInitialWorldDataPayload(conn, nil, cache, path, nil)
 	if err != nil {
 		t.Fatalf("build initial world payload: %v", err)
 	}
@@ -1763,6 +1763,75 @@ func TestSyncWorldDiffToConnReplaysRuntimeStateForUnchangedContainer(t *testing.
 	}
 	if !foundContainerSnapshot {
 		t.Fatal("expected diff sync to replay runtime blockSnapshot for unchanged container inventory")
+	}
+}
+
+func TestSyncWorldDiffToConnReplaysTileConfigForUnchangedConfiguredSorter(t *testing.T) {
+	srv := netserver.NewServer("127.0.0.1:0", 157)
+	srv.TypeIO.BuildingLookup = func(pos int32) protocol.Building {
+		return protocol.BuildingBox{PosValue: pos}
+	}
+	serverSide, clientSide := net.Pipe()
+	defer serverSide.Close()
+	defer clientSide.Close()
+
+	sendConn := netserver.NewConn(serverSide, srv.Serial)
+	defer sendConn.Close()
+
+	w := world.New(world.Config{TPS: 60})
+	model := world.NewWorldModel(24, 24)
+	model.BlockNames = map[int16]string{
+		600: "sorter",
+	}
+	sorterPos := placeSyncTestBuilding(t, model, 8, 10, 600, 1, 0)
+	w.SetModel(model)
+	w.ConfigureBuildingPacked(sorterPos, int16(4))
+	baseModel := w.CloneModel()
+	if baseModel == nil {
+		t.Fatal("expected base model clone")
+	}
+
+	syncWorldDiffToConn(sendConn, w, baseModel)
+	packets := collectRawPacketsUntilTimeout(t, clientSide, 12)
+	setTileID, ok := srv.Registry.PacketID(&protocol.Remote_Tile_setTile_140{})
+	if !ok {
+		t.Fatal("resolve setTile packet id")
+	}
+	tileConfigID, ok := srv.Registry.PacketID(&protocol.Remote_InputHandler_tileConfig_90{})
+	if !ok {
+		t.Fatal("resolve tileConfig packet id")
+	}
+
+	foundTileConfig := false
+	for _, packet := range packets {
+		if len(packet) == 0 {
+			continue
+		}
+		packetID, payload := decodeFramedPacket(t, packet)
+		if packetID == setTileID {
+			t.Fatal("expected unchanged configured sorter diff sync to avoid structural setTile replay")
+		}
+		if packetID != tileConfigID {
+			continue
+		}
+		typed := &protocol.Remote_InputHandler_tileConfig_90{}
+		if err := typed.Read(protocol.NewReaderWithContext(payload, srv.TypeIO), 0); err != nil {
+			t.Fatalf("decode tileConfig failed: %v", err)
+		}
+		if typed.Build == nil || typed.Build.Pos() != sorterPos {
+			continue
+		}
+		item, ok := typed.Value.(protocol.Content)
+		if !ok {
+			t.Fatalf("expected sorter tileConfig value as Content, got %T", typed.Value)
+		}
+		if item.ContentType() != protocol.ContentItem || item.ID() != 4 {
+			t.Fatalf("expected sorter tileConfig item id 4, got type=%v id=%d", item.ContentType(), item.ID())
+		}
+		foundTileConfig = true
+	}
+	if !foundTileConfig {
+		t.Fatal("expected diff sync to replay tileConfig for unchanged configured sorter")
 	}
 }
 

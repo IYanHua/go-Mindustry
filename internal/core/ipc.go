@@ -30,10 +30,17 @@ func newIPCClient(conn net.Conn) *ipcClient {
 }
 
 func (c *ipcClient) Close() error {
-	if c == nil || c.conn == nil {
+	if c == nil {
 		return nil
 	}
-	return c.conn.Close()
+	c.mu.Lock()
+	conn := c.conn
+	c.conn = nil
+	c.mu.Unlock()
+	if conn == nil {
+		return nil
+	}
+	return conn.Close()
 }
 
 func (c *ipcClient) Call(method string, req any, resp any) error {
@@ -45,7 +52,7 @@ func (c *ipcClient) CallWithTimeout(method string, req any, resp any, timeout ti
 }
 
 func (c *ipcClient) call(method string, req any, resp any, timeout time.Duration) error {
-	if c == nil || c.conn == nil {
+	if c == nil {
 		return fmt.Errorf("ipc client not connected")
 	}
 	var payload []byte
@@ -65,18 +72,22 @@ func (c *ipcClient) call(method string, req any, resp any, timeout time.Duration
 
 	c.mu.Lock()
 	defer c.mu.Unlock()
+	conn := c.conn
+	if conn == nil {
+		return fmt.Errorf("ipc client not connected")
+	}
 	if timeout > 0 {
-		if err := c.conn.SetDeadline(time.Now().Add(timeout)); err == nil {
+		if err := conn.SetDeadline(time.Now().Add(timeout)); err == nil {
 			defer func() {
-				_ = c.conn.SetDeadline(time.Time{})
+				_ = conn.SetDeadline(time.Time{})
 			}()
 		}
 	}
 
-	if err := writeIPCEnvelope(c.conn, env); err != nil {
+	if err := writeIPCEnvelope(conn, env); err != nil {
 		return err
 	}
-	reply, err := readIPCEnvelope(c.conn)
+	reply, err := readIPCEnvelope(conn)
 	if err != nil {
 		return err
 	}

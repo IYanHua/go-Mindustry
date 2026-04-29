@@ -41,7 +41,8 @@ type Core4 struct {
 	playerShardByKey  map[string]int
 	coreShardByKey    map[string]int
 
-	remote *remoteCore4Client
+	remoteMu sync.RWMutex
+	remote   *remoteCore4Client
 }
 
 func DefaultPolicyConfig() PolicyConfig {
@@ -107,7 +108,7 @@ func (c4 *Core4) SetPolicyConfig(cfg PolicyConfig) {
 }
 
 func (c4 *Core4) Start() {
-	if c4.remote != nil {
+	if c4.remoteClient() != nil {
 		c4.running.Store(true)
 		return
 	}
@@ -137,7 +138,7 @@ func (c4 *Core4) worker() {
 }
 
 func (c4 *Core4) Stop() {
-	if c4.remote != nil {
+	if c4.remoteClient() != nil {
 		c4.running.Store(false)
 		return
 	}
@@ -162,8 +163,8 @@ func (c4 *Core4) Send(msg Message) bool {
 }
 
 func (c4 *Core4) Stats() (int64, int64, int64, int64, int64) {
-	if c4.remote != nil {
-		received, processed, dropped, queueSize, latency, err := c4.remote.stats()
+	if remote := c4.remoteClient(); remote != nil {
+		received, processed, dropped, queueSize, latency, err := remote.stats()
 		if err == nil {
 			return received, processed, dropped, queueSize, latency
 		}
@@ -199,20 +200,20 @@ func (c4 *Core4) queryPolicy(msg *PolicyMessage) (PolicyResult, error) {
 	if c4 == nil || msg == nil {
 		return PolicyResult{}, errors.New("invalid policy request")
 	}
-	if c4.remote != nil {
+	if remote := c4.remoteClient(); remote != nil {
 		switch msg.Action {
 		case "allow_connection":
-			return c4.remote.allowConnection(msg.IP, msg.UUID)
+			return remote.allowConnection(msg.IP, msg.UUID)
 		case "allow_packet":
-			return c4.remote.allowPacket(msg.IP, msg.ConnID, msg.UUID, msg.Packet)
+			return remote.allowPacket(msg.IP, msg.ConnID, msg.UUID, msg.Packet)
 		case "record_open":
-			return PolicyResult{Allowed: true}, c4.remote.recordOpen(msg.ConnID, msg.IP, msg.UUID)
+			return PolicyResult{Allowed: true}, remote.recordOpen(msg.ConnID, msg.IP, msg.UUID)
 		case "record_close":
-			return PolicyResult{Allowed: true}, c4.remote.recordClose(msg.ConnID)
+			return PolicyResult{Allowed: true}, remote.recordClose(msg.ConnID)
 		case "player_shard":
-			return c4.remote.playerShard(msg.UUID, msg.IP)
+			return remote.playerShard(msg.UUID, msg.IP)
 		case "core_shard":
-			return c4.remote.coreShard(msg.Key)
+			return remote.coreShard(msg.Key)
 		default:
 			return PolicyResult{}, errors.New("unknown policy action")
 		}
@@ -233,11 +234,22 @@ func (c4 *Core4) AttachRemote(client *ipcClient) {
 	if c4 == nil {
 		return
 	}
+	c4.remoteMu.Lock()
+	defer c4.remoteMu.Unlock()
 	if client == nil {
 		c4.remote = nil
 		return
 	}
 	c4.remote = &remoteCore4Client{client: client}
+}
+
+func (c4 *Core4) remoteClient() *remoteCore4Client {
+	if c4 == nil {
+		return nil
+	}
+	c4.remoteMu.RLock()
+	defer c4.remoteMu.RUnlock()
+	return c4.remote
 }
 
 func (c4 *Core4) handlePolicyMessage(m *PolicyMessage) {

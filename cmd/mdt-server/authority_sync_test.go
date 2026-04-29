@@ -33,7 +33,7 @@ func TestBuildSyncSnapshotFromModelUsesBuildTeamWhenPresent(t *testing.T) {
 		MaxHealth: 100,
 	}
 
-	snaps := buildSyncSnapshotFromModel(model)
+	snaps := buildSyncSnapshotEntriesFromModel(model)
 	if len(snaps) != 1 {
 		t.Fatalf("expected 1 build sync snapshot, got %d", len(snaps))
 	}

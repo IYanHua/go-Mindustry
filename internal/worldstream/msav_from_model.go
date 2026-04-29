@@ -127,7 +127,7 @@ func encodeMapChunkMinimal(model *world.WorldModel) ([]byte, error) {
 		}
 		hasSaveData := t.HasData
 		isCenter := t.Build != nil && t.Build.X == t.X && t.Build.Y == t.Y
-		hasEntity := t.Build != nil && (!isCenter || len(t.Build.MapSyncData) > 0)
+		hasEntity := t.Build != nil
 		packed := byte(0)
 		if hasEntity {
 			packed |= 1
@@ -162,9 +162,10 @@ func encodeMapChunkMinimal(model *world.WorldModel) ([]byte, error) {
 			if err := w.WriteByte(1); err != nil {
 				return nil, err
 			}
-			chunk := make([]byte, 0, len(t.Build.MapSyncData)+1)
-			chunk = append(chunk, t.Build.MapSyncRevision)
-			chunk = append(chunk, t.Build.MapSyncData...)
+			chunk, err := encodeInlineBuildingChunkForModel(t.Build)
+			if err != nil {
+				return nil, err
+			}
 			if err := w.WriteInt32(int32(len(chunk))); err != nil {
 				return nil, err
 			}
@@ -179,6 +180,134 @@ func encodeMapChunkMinimal(model *world.WorldModel) ([]byte, error) {
 		if err := w.WriteByte(0); err != nil {
 			return nil, err
 		}
+	}
+	return out.Bytes(), nil
+}
+
+func encodeInlineBuildingChunkForModel(build *world.Building) ([]byte, error) {
+	if build == nil {
+		return nil, ErrInvalidMSAV
+	}
+	payload := build.MapSyncData
+	if len(payload) == 0 {
+		var err error
+		payload, err = encodeMinimalBuildingMapSyncData(build)
+		if err != nil {
+			return nil, err
+		}
+	}
+	chunk := make([]byte, 0, len(payload)+1)
+	chunk = append(chunk, build.MapSyncRevision)
+	chunk = append(chunk, payload...)
+	return chunk, nil
+}
+
+func encodeMinimalBuildingMapSyncData(build *world.Building) ([]byte, error) {
+	if build == nil {
+		return nil, ErrInvalidMSAV
+	}
+	var out bytes.Buffer
+	w := &javaWriter{buf: &out}
+
+	health := build.Health
+	switch {
+	case health > 0:
+	case build.MaxHealth > 0:
+		health = build.MaxHealth
+	default:
+		health = 1000
+	}
+	if err := w.WriteFloat32(health); err != nil {
+		return nil, err
+	}
+	if err := w.WriteByte(byte(int(build.Rotation)&0x7f | 0x80)); err != nil {
+		return nil, err
+	}
+	if err := w.WriteByte(byte(build.Team)); err != nil {
+		return nil, err
+	}
+	if err := w.WriteByte(3); err != nil {
+		return nil, err
+	}
+	if err := w.WriteByte(1); err != nil {
+		return nil, err
+	}
+
+	moduleBits := byte(1 << 3)
+	itemCount := 0
+	for _, stack := range build.Items {
+		if stack.Amount > 0 {
+			itemCount++
+		}
+	}
+	liquidCount := 0
+	for _, stack := range build.Liquids {
+		if stack.Amount > 0 {
+			liquidCount++
+		}
+	}
+	if itemCount > 0 {
+		moduleBits |= 1
+	}
+	if len(build.MapPowerLinks) > 0 || build.MapPowerStatusSet {
+		moduleBits |= 1 << 1
+	}
+	if liquidCount > 0 {
+		moduleBits |= 1 << 2
+	}
+	if err := w.WriteByte(moduleBits); err != nil {
+		return nil, err
+	}
+	if itemCount > 0 {
+		if err := w.WriteInt16(int16(itemCount)); err != nil {
+			return nil, err
+		}
+		for _, stack := range build.Items {
+			if stack.Amount <= 0 {
+				continue
+			}
+			if err := w.WriteInt16(int16(stack.Item)); err != nil {
+				return nil, err
+			}
+			if err := w.WriteInt32(stack.Amount); err != nil {
+				return nil, err
+			}
+		}
+	}
+	if (moduleBits & (1 << 1)) != 0 {
+		if err := w.WriteInt16(int16(len(build.MapPowerLinks))); err != nil {
+			return nil, err
+		}
+		for _, link := range build.MapPowerLinks {
+			if err := w.WriteInt32(link); err != nil {
+				return nil, err
+			}
+		}
+		if err := w.WriteFloat32(build.MapPowerStatus); err != nil {
+			return nil, err
+		}
+	}
+	if liquidCount > 0 {
+		if err := w.WriteInt16(int16(liquidCount)); err != nil {
+			return nil, err
+		}
+		for _, stack := range build.Liquids {
+			if stack.Amount <= 0 {
+				continue
+			}
+			if err := w.WriteInt16(int16(stack.Liquid)); err != nil {
+				return nil, err
+			}
+			if err := w.WriteFloat32(stack.Amount); err != nil {
+				return nil, err
+			}
+		}
+	}
+	if err := w.WriteByte(255); err != nil {
+		return nil, err
+	}
+	if err := w.WriteByte(255); err != nil {
+		return nil, err
 	}
 	return out.Bytes(), nil
 }

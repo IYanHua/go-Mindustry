@@ -2,6 +2,7 @@ package core
 
 import (
 	"strings"
+	"sync"
 	"time"
 
 	"mdt-server/internal/config"
@@ -16,6 +17,9 @@ type ServerCore struct {
 	Core4      *Core4
 	persistCfg config.PersistConfig
 	supervisor *coreSupervisor
+
+	childExitMu sync.RWMutex
+	onChildExit func(role string, err error)
 }
 
 // NewServerCore 创建服务器核心控制器（四核心架构）
@@ -48,7 +52,9 @@ func NewServerCore(gameInterval time.Duration, ioConfig Config, persistCfg confi
 		persistCfg: persistCfg,
 		supervisor: newCoreSupervisor(),
 	}
+	sc.supervisor.setUnexpectedExitHandler(sc.handleUnexpectedChildExit)
 	sc.Core2.SetServerCore(sc)
+	sc.Core2.SetPersistConfig(persistCfg)
 	sc.Core3.SetServerCore(sc)
 	sc.Core4.SetServerCore(sc)
 	return sc
@@ -149,6 +155,43 @@ func (sc *ServerCore) SetPersistStateProvider(fn func() persist.State) {
 	sc.Core2.SetStateProvider(fn)
 }
 
+func (sc *ServerCore) SetChildExitHandler(fn func(role string, err error)) {
+	if sc == nil {
+		return
+	}
+	sc.childExitMu.Lock()
+	defer sc.childExitMu.Unlock()
+	sc.onChildExit = fn
+}
+
+func (sc *ServerCore) handleUnexpectedChildExit(role string, err error) {
+	if sc == nil {
+		return
+	}
+	switch role {
+	case "core2":
+		if sc.Core2 != nil {
+			sc.Core2.AttachRemote(nil)
+		}
+	case "core3":
+		if sc.Core3 != nil {
+			sc.Core3.AttachRemote(nil)
+			sc.Core3.Stop()
+		}
+	case "core4":
+		if sc.Core4 != nil {
+			sc.Core4.AttachRemote(nil)
+			sc.Core4.Stop()
+		}
+	}
+	sc.childExitMu.RLock()
+	handler := sc.onChildExit
+	sc.childExitMu.RUnlock()
+	if handler != nil {
+		handler(role, err)
+	}
+}
+
 func (sc *ServerCore) EnableChildRoles(exePath string, extraArgs []string, roles ...string) error {
 	if sc == nil {
 		return nil
@@ -173,6 +216,13 @@ func (sc *ServerCore) EnableChildRoles(exePath string, extraArgs []string, roles
 			sc.supervisor.add(role, child)
 		}
 		switch role {
+		case "core2":
+			if sc.Core2 != nil {
+				sc.Core2.AttachRemote(child.Client)
+				if sc.Core2.workerCount > 1 {
+					sc.Core2.workerCount = 1
+				}
+			}
 		case "core3":
 			if sc.Core3 != nil {
 				sc.Core3.AttachRemote(child.Client)

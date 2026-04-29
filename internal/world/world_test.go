@@ -7646,6 +7646,196 @@ func TestUnloaderPrefersOnlyGiveSourceOverFactoryInputBuffer(t *testing.T) {
 	}
 }
 
+func TestUnloaderRespectsAllowCoreUnloadersRuleForLinkedCoreStorage(t *testing.T) {
+	w := New(Config{TPS: 60})
+	model := NewWorldModel(12, 12)
+	model.BlockNames = map[int16]string{
+		257: "conveyor",
+		430: "unloader",
+		431: "container",
+		432: "core-shard",
+	}
+	w.SetModel(model)
+
+	core := placeTestBuilding(t, w, 3, 4, 432, 1, 0)
+	placeTestBuilding(t, w, 5, 4, 431, 1, 0)
+	out := placeTestBuilding(t, w, 8, 4, 257, 1, 0)
+	placeTestBuilding(t, w, 7, 4, 430, 1, 0)
+
+	storePos := int32(4*model.Width + 5)
+	if linked, ok := w.storageLinkedCore[storePos]; !ok || linked != int32(4*model.Width+3) {
+		t.Fatalf("expected container to be linked to the nearby core, linked=%d ok=%v", linked, ok)
+	}
+
+	core.Build.AddItem(copperItemID, 1)
+	rules := w.GetRulesManager().Get()
+	rules.AllowCoreUnloaders = false
+
+	unloaderPos := int32(4*model.Width + 7)
+	w.ConfigureUnloader(unloaderPos, copperItemID)
+	w.transportAccum[unloaderPos] = float32(60.0 / 11.0)
+
+	unloaderTile, err := w.Model().TileAt(7, 4)
+	if err != nil || unloaderTile == nil {
+		t.Fatalf("unloader tile lookup failed: %v", err)
+	}
+
+	w.stepUnloaderLocked(unloaderPos, unloaderTile, 0)
+	if got := totalBuildingItems(out.Build); got != 0 {
+		t.Fatalf("expected unloader to respect allowCoreUnloaders=false, moved=%d", got)
+	}
+	if got := core.Build.ItemAmount(copperItemID); got != 1 {
+		t.Fatalf("expected core inventory to remain intact when core unloaders are disabled, got=%d", got)
+	}
+
+	rules.AllowCoreUnloaders = true
+	w.stepUnloaderLocked(unloaderPos, unloaderTile, 0)
+	if got := totalBuildingItems(out.Build); got == 0 {
+		t.Fatalf("expected unloader to resume unloading once allowCoreUnloaders is re-enabled")
+	}
+	if got := core.Build.ItemAmount(copperItemID); got != 0 {
+		t.Fatalf("expected core inventory to decrease after re-enabling core unloaders, got=%d", got)
+	}
+}
+
+func TestUnloaderDoesNotPullFromConveyor(t *testing.T) {
+	w := New(Config{TPS: 60})
+	model := NewWorldModel(8, 8)
+	model.BlockNames = map[int16]string{
+		257: "conveyor",
+		430: "unloader",
+	}
+	w.SetModel(model)
+
+	src := placeTestBuilding(t, w, 2, 3, 257, 1, 0)
+	placeTestBuilding(t, w, 3, 3, 430, 1, 0)
+	out := placeTestBuilding(t, w, 4, 3, 257, 1, 0)
+
+	src.Build.AddItem(copperItemID, 1)
+	unloaderPos := int32(3*model.Width + 3)
+	w.ConfigureUnloader(unloaderPos, copperItemID)
+	w.transportAccum[unloaderPos] = float32(60.0 / 11.0)
+
+	unloaderTile, err := w.Model().TileAt(3, 3)
+	if err != nil || unloaderTile == nil {
+		t.Fatalf("unloader tile lookup failed: %v", err)
+	}
+
+	w.stepUnloaderLocked(unloaderPos, unloaderTile, 0)
+	if got := totalBuildingItems(out.Build); got != 0 {
+		t.Fatalf("expected unloader not to pull from conveyor, moved=%d", got)
+	}
+	if got := src.Build.ItemAmount(copperItemID); got != 1 {
+		t.Fatalf("expected conveyor source inventory to remain untouched, got=%d", got)
+	}
+}
+
+func TestUnloaderDoesNotPullFromPlastaniumLoadingDock(t *testing.T) {
+	w := New(Config{TPS: 60})
+	model := NewWorldModel(10, 8)
+	model.BlockNames = map[int16]string{
+		257: "conveyor",
+		430: "unloader",
+		447: "plastanium-conveyor",
+	}
+	w.SetModel(model)
+
+	src := placeTestBuilding(t, w, 3, 3, 447, 1, 0)
+	placeTestBuilding(t, w, 4, 3, 447, 1, 0)
+	placeTestBuilding(t, w, 3, 2, 430, 1, 0)
+	out := placeTestBuilding(t, w, 4, 2, 257, 1, 0)
+	src.Build.AddItem(copperItemID, 1)
+
+	unloaderPos := int32(2*model.Width + 3)
+	w.ConfigureUnloader(unloaderPos, copperItemID)
+	w.transportAccum[unloaderPos] = float32(60.0 / 11.0)
+
+	unloaderTile, err := w.Model().TileAt(3, 2)
+	if err != nil || unloaderTile == nil {
+		t.Fatalf("unloader tile lookup failed: %v", err)
+	}
+
+	w.stepUnloaderLocked(unloaderPos, unloaderTile, 0)
+	if got := totalBuildingItems(out.Build); got != 0 {
+		t.Fatalf("expected unloader not to pull from plastanium loading dock, moved=%d", got)
+	}
+	if got := src.Build.ItemAmount(copperItemID); got != 1 {
+		t.Fatalf("expected plastanium loading dock inventory to remain untouched, got=%d", got)
+	}
+}
+
+func TestUnloaderCanPullFromSurgeConveyorUnloadState(t *testing.T) {
+	w := New(Config{TPS: 60})
+	model := NewWorldModel(10, 8)
+	model.BlockNames = map[int16]string{
+		257: "conveyor",
+		430: "unloader",
+		448: "surge-conveyor",
+	}
+	w.SetModel(model)
+
+	src := placeTestBuilding(t, w, 3, 3, 448, 1, 0)
+	placeTestBuilding(t, w, 3, 2, 430, 1, 0)
+	out := placeTestBuilding(t, w, 4, 2, 257, 1, 0)
+	src.Build.AddItem(copperItemID, 1)
+
+	unloaderPos := int32(2*model.Width + 3)
+	w.ConfigureUnloader(unloaderPos, copperItemID)
+	w.transportAccum[unloaderPos] = float32(60.0 / 11.0)
+
+	unloaderTile, err := w.Model().TileAt(3, 2)
+	if err != nil || unloaderTile == nil {
+		t.Fatalf("unloader tile lookup failed: %v", err)
+	}
+
+	w.stepUnloaderLocked(unloaderPos, unloaderTile, 0)
+	if got := totalBuildingItems(out.Build); got == 0 {
+		t.Fatalf("expected unloader to pull from surge conveyor when it is not a loading dock")
+	}
+	if got := src.Build.ItemAmount(copperItemID); got != 0 {
+		t.Fatalf("expected surge conveyor source inventory to decrease, got=%d", got)
+	}
+}
+
+func TestPlastaniumLoadingDockAcceptsSideInput(t *testing.T) {
+	w := New(Config{TPS: 60})
+	model := NewWorldModel(10, 8)
+	model.BlockNames = map[int16]string{
+		257: "conveyor",
+		447: "plastanium-conveyor",
+	}
+	w.SetModel(model)
+
+	source := placeTestBuilding(t, w, 3, 2, 257, 1, 0)
+	placeTestBuilding(t, w, 3, 3, 447, 1, 0)
+	placeTestBuilding(t, w, 4, 3, 447, 1, 0)
+
+	fromPos := int32(2*model.Width + 3)
+	toPos := int32(3*model.Width + 3)
+	if !w.stackConveyorAcceptsItemLocked(fromPos, toPos, copperItemID) {
+		t.Fatalf("expected plastanium loading dock to accept side input from conveyor at %v", source)
+	}
+}
+
+func TestSurgeConveyorRejectsSideInputWhenNotLoadingDock(t *testing.T) {
+	w := New(Config{TPS: 60})
+	model := NewWorldModel(10, 8)
+	model.BlockNames = map[int16]string{
+		257: "conveyor",
+		448: "surge-conveyor",
+	}
+	w.SetModel(model)
+
+	placeTestBuilding(t, w, 3, 2, 257, 1, 0)
+	placeTestBuilding(t, w, 3, 3, 448, 1, 0)
+
+	fromPos := int32(2*model.Width + 3)
+	toPos := int32(3*model.Width + 3)
+	if w.stackConveyorAcceptsItemLocked(fromPos, toPos, copperItemID) {
+		t.Fatal("expected surge conveyor to reject side input when it is not in loading-dock state")
+	}
+}
+
 func TestMassDriverTransfersBatchToLinkedTarget(t *testing.T) {
 	w := New(Config{TPS: 60})
 	model := NewWorldModel(24, 12)
@@ -7731,6 +7921,77 @@ func TestDuctBridgeTransfersBetweenLinks(t *testing.T) {
 	}
 }
 
+func TestOverflowDuctFlipsSideFallbackAfterFrontTransfer(t *testing.T) {
+	w := New(Config{TPS: 60})
+	model := NewWorldModel(10, 8)
+	model.BlockNames = map[int16]string{
+		431: "container",
+		445: "overflow-duct",
+	}
+	w.SetModel(model)
+
+	duct := placeTestBuilding(t, w, 3, 3, 445, 1, 0)
+	front := placeTestBuilding(t, w, 4, 3, 431, 1, 0)
+	left := placeTestBuilding(t, w, 3, 2, 431, 1, 0)
+	right := placeTestBuilding(t, w, 3, 4, 431, 1, 0)
+	duct.Build.AddItem(copperItemID, 2)
+
+	for i := 0; i < 2; i++ {
+		w.Step(time.Second / 60)
+	}
+	if got := front.Build.ItemAmount(copperItemID); got != 1 {
+		t.Fatalf("expected first overflow-duct transfer to go forward, got=%d", got)
+	}
+
+	front.Team = 2
+	front.Build.Team = 2
+
+	for i := 0; i < 2; i++ {
+		w.Step(time.Second / 60)
+	}
+	if got := right.Build.ItemAmount(copperItemID); got != 1 {
+		t.Fatalf("expected fallback side order to flip after forward transfer, right=%d", got)
+	}
+	if got := left.Build.ItemAmount(copperItemID); got != 0 {
+		t.Fatalf("expected flipped overflow-duct fallback not to send second item left, left=%d", got)
+	}
+}
+
+func TestUnderflowDuctFlipsSideFallbackAfterSingleSideTransfer(t *testing.T) {
+	w := New(Config{TPS: 60})
+	model := NewWorldModel(10, 8)
+	model.BlockNames = map[int16]string{
+		431: "container",
+		446: "underflow-duct",
+	}
+	w.SetModel(model)
+
+	duct := placeTestBuilding(t, w, 3, 3, 446, 1, 0)
+	left := placeTestBuilding(t, w, 3, 2, 431, 1, 0)
+	right := placeTestBuilding(t, w, 3, 4, 431, 2, 0)
+	duct.Build.AddItem(copperItemID, 2)
+
+	for i := 0; i < 2; i++ {
+		w.Step(time.Second / 60)
+	}
+	if got := left.Build.ItemAmount(copperItemID); got != 1 {
+		t.Fatalf("expected first underflow-duct transfer to use the only open side, left=%d", got)
+	}
+
+	right.Team = 1
+	right.Build.Team = 1
+
+	for i := 0; i < 2; i++ {
+		w.Step(time.Second / 60)
+	}
+	if got := right.Build.ItemAmount(copperItemID); got != 1 {
+		t.Fatalf("expected side fallback order to flip after single-side transfer, right=%d", got)
+	}
+	if got := left.Build.ItemAmount(copperItemID); got != 1 {
+		t.Fatalf("expected second underflow-duct transfer not to reuse left side, left=%d", got)
+	}
+}
+
 func TestDirectionalDuctUnloaderMovesConfiguredItem(t *testing.T) {
 	w := New(Config{TPS: 60})
 	model := NewWorldModel(8, 8)
@@ -7756,6 +8017,97 @@ func TestDirectionalDuctUnloaderMovesConfiguredItem(t *testing.T) {
 	}
 	if store.Build.ItemAmount(5) >= 3 {
 		t.Fatalf("expected duct-unloader to remove item from rear storage")
+	}
+}
+
+func TestDirectionalDuctUnloaderConsumesCooldownAfterBlockedAttempt(t *testing.T) {
+	w := New(Config{TPS: 60})
+	model := NewWorldModel(8, 8)
+	model.BlockNames = map[int16]string{
+		257: "conveyor",
+		431: "vault",
+		446: "duct-unloader",
+	}
+	w.SetModel(model)
+
+	store := placeTestBuilding(t, w, 1, 3, 431, 1, 0)
+	placeTestBuilding(t, w, 2, 3, 446, 1, 0)
+	out := placeTestBuilding(t, w, 3, 3, 257, 2, 0)
+	store.Build.AddItem(5, 3)
+
+	unloaderPos := int32(3*model.Width + 2)
+	w.ConfigureUnloader(unloaderPos, 5)
+	w.transportAccum[unloaderPos] = 4
+
+	unloaderTile, err := w.Model().TileAt(2, 3)
+	if err != nil || unloaderTile == nil {
+		t.Fatalf("duct-unloader tile lookup failed: %v", err)
+	}
+
+	// First attempt is blocked by the front block belonging to another team.
+	w.stepDirectionalUnloaderLocked(unloaderPos, unloaderTile, 4, 0)
+	if got := totalBuildingItems(out.Build); got != 0 {
+		t.Fatalf("expected blocked duct-unloader attempt to move no items, got=%d", got)
+	}
+
+	// Open the front side. Vanilla still waits for the next full cooldown window
+	// because the blocked attempt consumed its timer.
+	out.Team = 1
+	out.Build.Team = 1
+	w.stepDirectionalUnloaderLocked(unloaderPos, unloaderTile, 4, float32(1.0/60.0))
+	if got := totalBuildingItems(out.Build); got != 0 {
+		t.Fatalf("expected duct-unloader to wait for a fresh cooldown after a blocked attempt, got=%d", got)
+	}
+
+	for i := 0; i < 3; i++ {
+		w.stepDirectionalUnloaderLocked(unloaderPos, unloaderTile, 4, float32(1.0/60.0))
+	}
+	if got := totalBuildingItems(out.Build); got == 0 {
+		t.Fatalf("expected duct-unloader to move item after the next full cooldown")
+	}
+}
+
+func TestDirectionalDuctUnloaderBlocksCoreLinkedStorage(t *testing.T) {
+	w := New(Config{TPS: 60})
+	model := NewWorldModel(12, 12)
+	model.BlockNames = map[int16]string{
+		257: "conveyor",
+		431: "container",
+		432: "core-shard",
+		446: "duct-unloader",
+	}
+	w.SetModel(model)
+
+	placeTestBuilding(t, w, 3, 4, 432, 1, 0)
+	store := placeTestBuilding(t, w, 5, 4, 431, 1, 0)
+	out := placeTestBuilding(t, w, 8, 4, 257, 1, 0)
+	placeTestBuilding(t, w, 7, 4, 446, 1, 0)
+
+	storePos := int32(4*model.Width + 5)
+	if _, ok := w.storageLinkedCore[storePos]; !ok {
+		t.Fatal("expected container to be linked to the nearby core")
+	}
+
+	// Mirror the official linkedCore guard explicitly: even if stale map/runtime
+	// data leaves an item stack on the linked container, the duct-unloader must
+	// not extract from it.
+	store.Build.Items = []ItemStack{{Item: copperItemID, Amount: 1}}
+
+	unloaderPos := int32(4*model.Width + 7)
+	w.ConfigureUnloader(unloaderPos, copperItemID)
+	w.transportAccum[unloaderPos] = 4
+
+	unloaderTile, err := w.Model().TileAt(7, 4)
+	if err != nil || unloaderTile == nil {
+		t.Fatalf("duct-unloader tile lookup failed: %v", err)
+	}
+
+	w.stepDirectionalUnloaderLocked(unloaderPos, unloaderTile, 4, 0)
+	if got := totalBuildingItems(out.Build); got != 0 {
+		t.Fatalf("expected duct-unloader to reject linked-core storage, moved=%d", got)
+	}
+	if got := store.Build.ItemAmount(copperItemID); got != 1 {
+		t.Fatalf("expected linked storage inventory to remain untouched, got=%d", got)
 	}
 }
 
@@ -10862,6 +11214,36 @@ func TestCloneModelForWorldStreamBuildsPayloadDeconstructorPayload(t *testing.T)
 	}
 	if len(tileClone.Build.MapSyncData) == 0 {
 		t.Fatal("expected payload deconstructor world-stream payload bytes")
+	}
+}
+
+func TestSetModelSkipsMalformedBuildingPayload(t *testing.T) {
+	w := New(Config{TPS: 60})
+	model := NewWorldModel(16, 16)
+	model.BlockNames = map[int16]string{
+		701: "payload-router",
+	}
+	tile, err := model.TileAt(8, 8)
+	if err != nil || tile == nil {
+		t.Fatalf("tile lookup failed: %v", err)
+	}
+	tile.Block = 701
+	tile.Team = 1
+	tile.Rotation = 1
+	tile.Build = &Building{
+		Block:    701,
+		Team:     1,
+		Rotation: 1,
+		X:        8,
+		Y:        8,
+		Payload:  []byte{1},
+	}
+
+	w.SetModel(model)
+
+	pos := int32(tile.Y*model.Width + tile.X)
+	if st := w.payloadStates[pos]; st != nil && st.Payload != nil {
+		t.Fatalf("expected malformed payload to be skipped, got %+v", st.Payload)
 	}
 }
 

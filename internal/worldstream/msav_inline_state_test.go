@@ -1,12 +1,49 @@
 package worldstream
 
 import (
+	"os"
 	"path/filepath"
 	"testing"
+	"time"
 
 	"mdt-server/internal/protocol"
 	"mdt-server/internal/world"
 )
+
+func placeInlineConfigHydrationTestTile(t *testing.T, model *world.WorldModel, x, y int, blockID int16, name string) *world.Tile {
+	t.Helper()
+	if model.BlockNames == nil {
+		model.BlockNames = map[int16]string{}
+	}
+	model.BlockNames[blockID] = name
+	tile, err := model.TileAt(x, y)
+	if err != nil || tile == nil {
+		t.Fatalf("tile lookup failed at (%d,%d): %v", x, y, err)
+	}
+	tile.Block = world.BlockID(blockID)
+	tile.Team = 1
+	tile.Build = &world.Building{
+		Block:     world.BlockID(blockID),
+		Team:      1,
+		X:         x,
+		Y:         y,
+		Health:    100,
+		MaxHealth: 100,
+	}
+	return tile
+}
+
+func decodeInlineHydratedConfig(t *testing.T, raw []byte) any {
+	t.Helper()
+	if len(raw) == 0 {
+		t.Fatal("expected hydrated config bytes")
+	}
+	value, err := protocol.ReadObject(protocol.NewReader(raw), false, nil)
+	if err != nil {
+		t.Fatalf("decode hydrated config failed: %v", err)
+	}
+	return value
+}
 
 func TestHydrateInlineBuildingConfigsRestoresBridgeLink(t *testing.T) {
 	model := world.NewWorldModel(20, 20)
@@ -71,8 +108,163 @@ func TestHydrateInlineBuildingConfigsRestoresBridgeLink(t *testing.T) {
 	}
 }
 
+func TestHydrateInlineBuildingConfigsRestoresItemConfigBlocks(t *testing.T) {
+	tests := []struct {
+		name    string
+		blockID int16
+		block   string
+		itemID  int16
+		extra   func(*protocol.Writer) error
+	}{
+		{name: "item source", blockID: 600, block: "item-source", itemID: 5},
+		{name: "sorter", blockID: 601, block: "sorter", itemID: 7},
+		{
+			name:    "duct unloader",
+			blockID: 602,
+			block:   "duct-unloader",
+			itemID:  9,
+			extra: func(w *protocol.Writer) error {
+				return w.WriteInt16(3)
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			model := world.NewWorldModel(8, 8)
+			tile := placeInlineConfigHydrationTestTile(t, model, 3, 4, tt.blockID, tt.block)
+			w := protocol.NewWriter()
+			if err := w.WriteInt16(tt.itemID); err != nil {
+				t.Fatalf("write item id failed: %v", err)
+			}
+			if tt.extra != nil {
+				if err := tt.extra(w); err != nil {
+					t.Fatalf("write extra payload failed: %v", err)
+				}
+			}
+			tile.Build.MapSyncTail = append([]byte(nil), w.Bytes()...)
+
+			hydrateInlineBuildingConfigs(model)
+
+			value := decodeInlineHydratedConfig(t, tile.Build.Config)
+			item, ok := value.(protocol.Content)
+			if !ok {
+				t.Fatalf("expected hydrated item config as Content, got %T", value)
+			}
+			if item.ContentType() != protocol.ContentItem || item.ID() != tt.itemID {
+				t.Fatalf("expected item content id %d, got type=%v id=%d", tt.itemID, item.ContentType(), item.ID())
+			}
+		})
+	}
+}
+
+func TestHydrateInlineBuildingConfigsRestoresLiquidSourceConfig(t *testing.T) {
+	model := world.NewWorldModel(8, 8)
+	tile := placeInlineConfigHydrationTestTile(t, model, 2, 5, 610, "liquid-source")
+	w := protocol.NewWriter()
+	if err := w.WriteInt16(4); err != nil {
+		t.Fatalf("write liquid id failed: %v", err)
+	}
+	tile.Build.MapSyncTail = append([]byte(nil), w.Bytes()...)
+
+	hydrateInlineBuildingConfigs(model)
+
+	value := decodeInlineHydratedConfig(t, tile.Build.Config)
+	content, ok := value.(protocol.Content)
+	if !ok {
+		t.Fatalf("expected hydrated liquid config as Content, got %T", value)
+	}
+	if content.ContentType() != protocol.ContentLiquid || content.ID() != 4 {
+		t.Fatalf("expected liquid content id 4, got type=%v id=%d", content.ContentType(), content.ID())
+	}
+}
+
+func TestHydrateInlineBuildingConfigsRestoresPayloadRouterConfig(t *testing.T) {
+	model := world.NewWorldModel(8, 8)
+	tile := placeInlineConfigHydrationTestTile(t, model, 1, 6, 620, "payload-router")
+	w := protocol.NewWriter()
+	if err := w.WriteByte(byte(protocol.ContentBlock)); err != nil {
+		t.Fatalf("write payload content type failed: %v", err)
+	}
+	if err := w.WriteInt16(342); err != nil {
+		t.Fatalf("write payload content id failed: %v", err)
+	}
+	if err := w.WriteByte(1); err != nil {
+		t.Fatalf("write payload router recDir failed: %v", err)
+	}
+	tile.Build.MapSyncTail = append([]byte(nil), w.Bytes()...)
+
+	hydrateInlineBuildingConfigs(model)
+
+	value := decodeInlineHydratedConfig(t, tile.Build.Config)
+	content, ok := value.(protocol.Content)
+	if !ok {
+		t.Fatalf("expected hydrated payload-router config as Content, got %T", value)
+	}
+	if content.ContentType() != protocol.ContentBlock || content.ID() != 342 {
+		t.Fatalf("expected payload-router block content id 342, got type=%v id=%d", content.ContentType(), content.ID())
+	}
+}
+
+func TestHydrateInlineBuildingConfigsFeedsRuntimeSorterAndItemSource(t *testing.T) {
+	model := world.NewWorldModel(8, 8)
+	model.BlockNames = map[int16]string{
+		257: "conveyor",
+		412: "item-source",
+		500: "sorter",
+	}
+
+	source := placeInlineConfigHydrationTestTile(t, model, 1, 3, 412, "item-source")
+	sorter := placeInlineConfigHydrationTestTile(t, model, 2, 3, 500, "sorter")
+	forward := placeInlineConfigHydrationTestTile(t, model, 3, 3, 257, "conveyor")
+	side := placeInlineConfigHydrationTestTile(t, model, 2, 2, 257, "conveyor")
+	side.Rotation = 3
+	side.Build.Rotation = 3
+
+	sourceCfg := protocol.NewWriter()
+	if err := sourceCfg.WriteInt16(5); err != nil {
+		t.Fatalf("write item-source inline config failed: %v", err)
+	}
+	source.Build.MapSyncTail = append([]byte(nil), sourceCfg.Bytes()...)
+
+	sorterCfg := protocol.NewWriter()
+	if err := sorterCfg.WriteInt16(5); err != nil {
+		t.Fatalf("write sorter inline config failed: %v", err)
+	}
+	sorter.Build.MapSyncTail = append([]byte(nil), sorterCfg.Bytes()...)
+
+	hydrateInlineBuildingConfigs(model)
+
+	if len(source.Build.Config) == 0 {
+		t.Fatal("expected item-source inline config to hydrate into stored config bytes")
+	}
+	if len(sorter.Build.Config) == 0 {
+		t.Fatal("expected sorter inline config to hydrate into stored config bytes")
+	}
+
+	w := world.New(world.Config{TPS: 60})
+	w.SetModel(model)
+
+	for i := 0; i < 120; i++ {
+		w.Step(time.Second / 60)
+	}
+
+	if forward.Build.ItemAmount(5) == 0 {
+		t.Fatalf("expected hydrated map sorter/item-source config to move matching item forward")
+	}
+	if side.Build.ItemAmount(5) != 0 {
+		t.Fatalf("expected hydrated map sorter config not to route matching item sideways, got=%d", side.Build.ItemAmount(5))
+	}
+}
+
 func TestLoadWorldModelFromMSAVHydratesPowerNodeConfig(t *testing.T) {
 	path := filepath.Join("..", "..", "assets", "worlds", "maps", "serpulo", "hidden", "127.msav")
+	if _, err := os.Stat(path); err != nil {
+		if os.IsNotExist(err) {
+			t.Skip("hidden 127 map not present in workspace")
+		}
+		t.Fatalf("stat hidden 127 map failed: %v", err)
+	}
 	model, err := LoadWorldModelFromMSAV(path, nil)
 	if err != nil {
 		t.Fatalf("load world model failed: %v", err)

@@ -950,6 +950,10 @@ func main() {
 	}
 
 	resolvedCfgPath := resolveStartupConfigPath(*cfgPath)
+	if err := bootstrap.EnsureStartupConfigTree(resolvedCfgPath); err != nil {
+		fmt.Fprintf(os.Stderr, "释放内置配置失败: %v\n", err)
+		os.Exit(1)
+	}
 	cfg := config.Default()
 	cfg.Source = resolvedCfgPath
 	if loaded, err := config.Load(cfg.Source); err != nil {
@@ -962,7 +966,7 @@ func main() {
 	applyProcessConsoleTitle(cfg, strings.TrimSpace(*coreRole), cfg.Runtime.ServerName)
 	applyProcessWindowIcon()
 	if strings.TrimSpace(*coreRole) != "" {
-		if err := coreio.RunChildCore(*coreRole, *ipcEndpoint, *parentPID); err != nil {
+		if err := coreio.RunChildCore(*coreRole, *ipcEndpoint, *parentPID, cfg.Persist); err != nil {
 			fmt.Fprintf(os.Stderr, "child core %s failed: %v\n", *coreRole, err)
 			os.Exit(1)
 		}
@@ -1827,6 +1831,7 @@ func main() {
 	scriptCtl := newScriptController(cfg.Mods)
 	scriptCtl.ScheduleStartupTasks(cfg.Script.StartupTasks)
 	scriptCtl.SetDailyGC(cfg.Script.DailyGCTime)
+	var serverCore *coreio.ServerCore
 
 	cache = &worldCache{content: srv.Content}
 	invalidateWorldCache = func() {
@@ -1842,7 +1847,11 @@ func main() {
 		startup.ok("世界流缓存", state.get())
 	}
 	srv.WorldDataFn = func(conn *netserver.Conn, _ *protocol.ConnectPacket) ([]byte, error) {
-		payload, err := buildInitialWorldDataPayload(conn, wld, cache, state.get())
+		var ioCore *coreio.Core2
+		if serverCore != nil {
+			ioCore = serverCore.Core2
+		}
+		payload, err := buildInitialWorldDataPayload(conn, wld, cache, state.get(), ioCore)
 		if err == nil {
 			tc := currentTraceCfg()
 			if tc.Enabled && tc.WorldStreamEnabled {
@@ -1876,14 +1885,10 @@ func main() {
 		if conn == nil {
 			return
 		}
-		// Wait until client applies world stream, then reconcile against the
-		// template map and finally overwrite with the current authoritative live state.
-		time.Sleep(350 * time.Millisecond)
 		if !conn.UsesLiveWorldStream() {
 			syncRulesToConn(conn, wld, state.get())
 		}
 		syncAuthoritativeWorldToConn(srv, conn, wld, cache.model(state.get()), cfg.Sync.Strategy)
-		scheduleCurrentRuntimeStateRepair(srv, conn, wld, state.get(), 1200*time.Millisecond)
 		showJoinPopupForConn(srv, conn)
 		// Keep connect grace long enough for the official client to finish
 		// applying the streamed world and rebinding its spawned unit.
@@ -1900,7 +1905,6 @@ func main() {
 			syncRulesToConn(conn, wld, state.get())
 		}
 		syncAuthoritativeWorldToConn(srv, conn, wld, cache.model(state.get()), cfg.Sync.Strategy)
-		scheduleCurrentRuntimeStateRepair(srv, conn, wld, state.get(), 900*time.Millisecond)
 		srv.RefreshPlayerDisplayNames()
 		conn.SetWorldReloadGrace(2 * time.Second)
 	}
@@ -2846,7 +2850,6 @@ func main() {
 	}
 
 	var engine *sim.Engine
-	var serverCore *coreio.ServerCore
 	if cfg.Core.DualCoreEnabled {
 		ioWorkers := cfg.Runtime.Cores / 2
 		if ioWorkers < 2 {
@@ -2951,7 +2954,13 @@ func main() {
 				}
 				if serverCore.Core4 != nil && c != nil {
 					if pkt, ok := obj.(*protocol.ConnectPacket); ok {
-						if res, perr := serverCore.Core4.AllowConnection(connRemoteIP(c), pkt.UUID); perr == nil && !res.Allowed {
+						res, perr := serverCore.Core4.AllowConnection(connRemoteIP(c), pkt.UUID)
+						if perr != nil {
+							fmt.Printf("[core4] allow_connection failed conn=%d ip=%s uuid=%s err=%v\n", c.ConnID(), connRemoteIP(c), pkt.UUID, perr)
+							_ = c.Close()
+							return true
+						}
+						if !res.Allowed {
 							_ = c.Close()
 							return true
 						}
@@ -2959,7 +2968,13 @@ func main() {
 							_, _ = serverCore.Core4.PlayerShard(connUUID, connRemoteIP(c))
 						}
 					}
-					if res, perr := serverCore.Core4.AllowPacket(connRemoteIP(c), c.ConnID(), c.UUID(), fmt.Sprintf("%T", obj)); perr == nil && !res.Allowed {
+					res, perr := serverCore.Core4.AllowPacket(connRemoteIP(c), c.ConnID(), c.UUID(), fmt.Sprintf("%T", obj))
+					if perr != nil {
+						fmt.Printf("[core4] allow_packet failed conn=%d ip=%s uuid=%s packet=%T err=%v\n", c.ConnID(), connRemoteIP(c), c.UUID(), obj, perr)
+						_ = c.Close()
+						return true
+					}
+					if !res.Allowed {
 						_ = c.Close()
 						return true
 					}
@@ -3031,12 +3046,14 @@ func main() {
 				Rand0:    snap.Rand0,
 				Rand1:    snap.Rand1,
 			}
+			stateBytes, _ := json.Marshal(stateData)
 			savedState := false
 			if serverCore != nil {
 				ch := make(chan coreio.PersistenceResult, 1)
 				if !serverCore.SendToCore2(&coreio.PersistenceMessage{
 					Action:     "save_state",
 					Path:       state.get(),
+					StateData:  stateBytes,
 					ResultChan: ch,
 				}) {
 					fmt.Println("persist save_state skipped: core2 queue unavailable, using direct save")
@@ -3200,6 +3217,16 @@ func main() {
 		}
 		stopServer(fmt.Sprintf("收到信号 %s，正在保存并关闭服务器", sig))
 	}()
+	if serverCore != nil {
+		serverCore.SetChildExitHandler(func(role string, err error) {
+			if err != nil {
+				fmt.Printf("[core] %s 子进程异常退出: %v\n", role, err)
+			} else {
+				fmt.Printf("[core] %s 子进程已退出\n", role)
+			}
+			stopServer(fmt.Sprintf("检测到 %s 子进程退出，正在保存并关闭服务器", role))
+		})
+	}
 	if apiSrv != nil {
 		apiSrv.SetSummonFunc(func(typeID int16, x, y float32, team byte) error {
 			ent, err := wld.AddEntity(typeID, x, y, world.TeamID(team))
@@ -3295,6 +3322,7 @@ func main() {
 			srv.SetServerName(loaded.Runtime.ServerName)
 			srv.SetServerDescription(loaded.Runtime.ServerDesc)
 			srv.SetVirtualPlayers(int32(loaded.Runtime.VirtualPlayers))
+			applyProcessConsoleTitle(loaded, "", loaded.Runtime.ServerName)
 			srv.UdpRetryCount = loaded.Net.UdpRetryCount
 			srv.UdpRetryDelay = time.Duration(loaded.Net.UdpRetryDelayMs) * time.Millisecond
 			srv.UdpFallbackTCP = loaded.Net.UdpFallbackTCP
@@ -3693,8 +3721,12 @@ func runConsole(
 				}
 				name := strings.TrimSpace(strings.Join(parts[2:], " "))
 				srv.SetServerName(name)
+				applyProcessConsoleTitle(*cfg, "", name)
 				cfg.Runtime.ServerName = name
-				_ = saveConfig()
+				if err := saveConfig(); err != nil {
+					fmt.Printf("保存服务器名称失败: %v\n", err)
+					continue
+				}
 				fmt.Printf("已设置服务器名称: %s\n", name)
 			case "desc":
 				if len(parts) < 3 {
@@ -3704,7 +3736,10 @@ func runConsole(
 				desc := strings.TrimSpace(strings.Join(parts[2:], " "))
 				srv.SetServerDescription(desc)
 				cfg.Runtime.ServerDesc = desc
-				_ = saveConfig()
+				if err := saveConfig(); err != nil {
+					fmt.Printf("保存服务器简介失败: %v\n", err)
+					continue
+				}
 				fmt.Printf("已设置服务器简介: %s\n", desc)
 			case "players":
 				if len(parts) < 3 {
@@ -3718,7 +3753,10 @@ func runConsole(
 				}
 				srv.SetVirtualPlayers(int32(n))
 				cfg.Runtime.VirtualPlayers = n
-				_ = saveConfig()
+				if err := saveConfig(); err != nil {
+					fmt.Printf("保存虚拟人数失败: %v\n", err)
+					continue
+				}
 				fmt.Printf("已设置虚拟人数: %d\n", n)
 			default:
 				fmt.Println("用法: server status | server name <名称> | server desc <简介> | server players <虚拟人数>")
@@ -5566,6 +5604,22 @@ func newTileConfigPacket(pos int32, value any) (*protocol.Remote_InputHandler_ti
 	}, true
 }
 
+func sendTileConfigMapToConn(conn *netserver.Conn, configs map[int32]any) {
+	if conn == nil || len(configs) == 0 {
+		return
+	}
+	positions := make([]int32, 0, len(configs))
+	for pos := range configs {
+		positions = append(positions, pos)
+	}
+	sort.Slice(positions, func(i, j int) bool { return positions[i] < positions[j] })
+	for _, pos := range positions {
+		if packet, ok := newTileConfigPacket(pos, configs[pos]); ok {
+			_ = conn.SendAsync(packet)
+		}
+	}
+}
+
 func shouldSendTileConfigForPacked(wld *world.World, pos int32, value any) bool {
 	if wld == nil || value == nil {
 		return false
@@ -5712,7 +5766,7 @@ func authoritativeTileStatePacketsForPacked(wld *world.World, pos int32) []any {
 	}
 
 	team := tile.Team
-	if tile.Build.Team != 0 {
+	if tile.Build != nil {
 		team = tile.Build.Team
 	}
 	hp := tile.Build.Health
@@ -5892,9 +5946,6 @@ func syncCurrentWorldToConn(conn *netserver.Conn, wld *world.World) {
 				value: cfgValue,
 			})
 		}
-		if i > 0 && i%128 == 0 {
-			time.Sleep(5 * time.Millisecond)
-		}
 	}
 	if len(health) > 0 {
 		_ = conn.SendAsync(&protocol.Remote_Tile_buildHealthUpdate_144{
@@ -5902,12 +5953,9 @@ func syncCurrentWorldToConn(conn *netserver.Conn, wld *world.World) {
 		})
 	}
 	sendBlockSnapshotsToConn(conn, wld)
-	for i, cfg := range configs {
+	for _, cfg := range configs {
 		if packet, ok := newTileConfigPacket(cfg.pos, cfg.value); ok {
 			_ = conn.SendAsync(packet)
-		}
-		if i > 0 && i%128 == 0 {
-			time.Sleep(5 * time.Millisecond)
 		}
 	}
 }
@@ -5919,11 +5967,7 @@ func syncLiveWorldRuntimeToConn(conn *netserver.Conn, wld *world.World) {
 	builds := wld.BuildSyncSnapshot()
 	health := make([]int32, 0, 256)
 	unsupportedPositions := make([]int32, 0, 64)
-	type buildConfigState struct {
-		pos   int32
-		value any
-	}
-	configs := make([]buildConfigState, 0, 64)
+	configs := make(map[int32]any, 64)
 	for i := range builds {
 		b := builds[i]
 		if b.BlockID <= 0 {
@@ -5942,40 +5986,22 @@ func syncLiveWorldRuntimeToConn(conn *netserver.Conn, wld *world.World) {
 				health = health[:0]
 			}
 			if cfgValue, ok := wld.BuildingConfigPacked(b.Pos); ok && shouldSendTileConfigForPacked(wld, b.Pos, cfgValue) {
-				configs = append(configs, buildConfigState{
-					pos:   b.Pos,
-					value: cfgValue,
-				})
-			}
-			if i > 0 && i%128 == 0 {
-				time.Sleep(5 * time.Millisecond)
+				configs[b.Pos] = cfgValue
 			}
 			continue
 		}
 		unsupportedPositions = append(unsupportedPositions, b.Pos)
-		if i > 0 && i%128 == 0 {
-			time.Sleep(5 * time.Millisecond)
-		}
 	}
 	if len(health) > 0 {
 		_ = conn.SendAsync(&protocol.Remote_Tile_buildHealthUpdate_144{
 			Buildings: protocol.IntSeq{Items: health},
 		})
 	}
-	for i, pos := range unsupportedPositions {
+	for _, pos := range unsupportedPositions {
 		sendAuthoritativeTileStateToConn(conn, wld, pos)
-		if i > 0 && i%64 == 0 {
-			time.Sleep(5 * time.Millisecond)
-		}
 	}
-	for i, cfg := range configs {
-		if packet, ok := newTileConfigPacket(cfg.pos, cfg.value); ok {
-			_ = conn.SendAsync(packet)
-		}
-		if i > 0 && i%128 == 0 {
-			time.Sleep(5 * time.Millisecond)
-		}
-	}
+	sendBlockSnapshotsToConn(conn, wld)
+	sendTileConfigMapToConn(conn, configs)
 }
 
 func syncCoreItemsToConn(conn *netserver.Conn, wld *world.World) {
@@ -6003,7 +6029,6 @@ func syncDeferredLiveRuntimeStateToConn(srv *netserver.Server, conn *netserver.C
 	}
 	syncRulesToConn(conn, wld, mapPath)
 	syncLiveWorldRuntimeToConn(conn, wld)
-	sendBlockSnapshotsToConn(conn, wld)
 	if srv != nil {
 		_ = srv.SyncEntitySnapshotsToConn(conn)
 	}
@@ -6030,17 +6055,11 @@ func syncAuthoritativeWorldToConn(srv *netserver.Server, conn *netserver.Conn, w
 		return
 	}
 	if conn.UsesLiveWorldStream() {
-		syncLiveWorldRuntimeToConn(conn, wld)
-		if srv != nil {
-			_ = srv.SyncEntitySnapshotsToConn(conn)
-		}
+		syncDeferredLiveRuntimeStateToConn(srv, conn, wld, "")
 		return
 	}
-	liveModel := wld.CloneModel()
-	if liveModel == nil {
-		return
-	}
-	if baseModel == nil || baseModel.Width != liveModel.Width || baseModel.Height != liveModel.Height {
+	width, height, ok := wld.Bounds()
+	if !ok || baseModel == nil || baseModel.Width != width || baseModel.Height != height {
 		syncCurrentWorldToConn(conn, wld)
 		if srv != nil {
 			_ = srv.SyncEntitySnapshotsToConn(conn)
@@ -6071,19 +6090,16 @@ func syncWorldDiffToConn(conn *netserver.Conn, wld *world.World, baseModel *worl
 	if conn == nil || wld == nil {
 		return
 	}
-	liveModel := wld.CloneModel()
-	if liveModel == nil {
-		return
-	}
-	if baseModel == nil || baseModel.Width != liveModel.Width || baseModel.Height != liveModel.Height {
+	width, height, ok := wld.Bounds()
+	if !ok || baseModel == nil || baseModel.Width != width || baseModel.Height != height {
 		syncCurrentWorldToConn(conn, wld)
 		return
 	}
 
-	baseStates := buildSyncSnapshotFromModel(baseModel)
-	liveStates := buildSyncSnapshotFromModel(liveModel)
-	baseByPos := make(map[int32]world.BuildSyncState, len(baseStates))
-	liveByPos := make(map[int32]world.BuildSyncState, len(liveStates))
+	baseStates := buildSyncSnapshotEntriesFromModel(baseModel)
+	liveStates := wld.BuildSyncSnapshotWithConfig()
+	baseByPos := make(map[int32]world.BuildSyncSnapshotEntry, len(baseStates))
+	liveByPos := make(map[int32]world.BuildSyncSnapshotEntry, len(liveStates))
 	posSet := make(map[int32]struct{}, len(baseStates)+len(liveStates))
 	for _, state := range baseStates {
 		baseByPos[state.Pos] = state
@@ -6106,9 +6122,23 @@ func syncWorldDiffToConn(conn *netserver.Conn, wld *world.World, baseModel *worl
 
 	health := make([]int32, 0, 256)
 	changedPacked := make([]int32, 0, 256)
-	for i, pos := range positions {
+	configs := make(map[int32]any, 64)
+	for _, pos := range positions {
 		baseState, baseOK := baseByPos[pos]
 		liveState, liveOK := liveByPos[pos]
+		var cfgValue any
+		cfgOK := false
+		if liveOK && liveState.BlockID > 0 {
+			if liveCfg, ok := wld.BuildingConfigPacked(pos); ok {
+				cfgValue = liveCfg
+				cfgOK = true
+			} else if len(liveState.Config) > 0 {
+				cfgValue, cfgOK = decodeTileConfigBytes(liveState.Config)
+			}
+			if cfgOK && shouldSendTileConfigForPacked(wld, pos, cfgValue) {
+				configs[pos] = cfgValue
+			}
+		}
 		structuralChange := !baseOK || !liveOK ||
 			baseState.BlockID != liveState.BlockID ||
 			baseState.Team != liveState.Team ||
@@ -6118,7 +6148,7 @@ func syncWorldDiffToConn(conn *netserver.Conn, wld *world.World, baseModel *worl
 			baseState.Team == liveState.Team &&
 			baseState.Rotation == liveState.Rotation &&
 			sameBuildHealth(baseState.Health, liveState.Health) &&
-			sameTileConfigAtPos(baseModel, liveModel, pos) {
+			sameConfigBytes(baseState.Config, liveState.Config) {
 			continue
 		}
 
@@ -6147,11 +6177,6 @@ func syncWorldDiffToConn(conn *netserver.Conn, wld *world.World, baseModel *worl
 			continue
 		}
 
-		var cfgValue any
-		cfgOK := false
-		if tile, ok := tileAtPacked(liveModel, pos); ok && tile != nil {
-			cfgValue, cfgOK = decodeTileConfigValue(tile)
-		}
 		if structuralChange && (modelTileIsConstructLike(baseModel, pos) || !baseOK || baseState.BlockID <= 0) {
 			// Join-time correction can target tiles that were air in the template but
 			// already exist live on the authoritative server. Finish any client-side
@@ -6172,31 +6197,17 @@ func syncWorldDiffToConn(conn *netserver.Conn, wld *world.World, baseModel *worl
 			Team:     protocol.Team{ID: byte(liveState.Team)},
 			Rotation: int32(liveState.Rotation) & 0x3,
 		})
-
-		if tile, ok := tileAtPacked(liveModel, pos); ok && tile.Build != nil {
-			hp := tile.Build.Health
-			if hp <= 0 {
-				hp = tile.Build.MaxHealth
-			}
-			if hp <= 0 {
-				hp = 1000
-			}
-			health = append(health, pos, int32(math.Float32bits(hp)))
-			if (cfgOK || !sameTileConfigAtPos(baseModel, liveModel, pos)) && shouldSendTileConfigForPacked(wld, pos, cfgValue) {
-				if packet, ok := newTileConfigPacket(pos, cfgValue); ok {
-					_ = conn.SendAsync(packet)
-				}
-			}
-			changedPacked = append(changedPacked, pos)
+		hp := liveState.Health
+		if hp <= 0 {
+			hp = 1000
 		}
+		health = append(health, pos, int32(math.Float32bits(hp)))
+		changedPacked = append(changedPacked, pos)
 		if len(health) >= 256 {
 			_ = conn.SendAsync(&protocol.Remote_Tile_buildHealthUpdate_144{
 				Buildings: protocol.IntSeq{Items: append([]int32(nil), health...)},
 			})
 			health = health[:0]
-		}
-		if i > 0 && i%128 == 0 {
-			time.Sleep(5 * time.Millisecond)
 		}
 	}
 	if len(health) > 0 {
@@ -6211,13 +6222,14 @@ func syncWorldDiffToConn(conn *netserver.Conn, wld *world.World, baseModel *worl
 	// connect do not roll item/progress/ammo state back to map-load values.
 	sendBlockSnapshotsToConn(conn, wld)
 	syncCoreItemsToConn(conn, wld)
+	sendTileConfigMapToConn(conn, configs)
 }
 
-func buildSyncSnapshotFromModel(model *world.WorldModel) []world.BuildSyncState {
+func buildSyncSnapshotEntriesFromModel(model *world.WorldModel) []world.BuildSyncSnapshotEntry {
 	if model == nil || len(model.Tiles) == 0 {
 		return nil
 	}
-	out := make([]world.BuildSyncState, 0, len(model.Tiles)/4)
+	out := make([]world.BuildSyncSnapshotEntry, 0, len(model.Tiles)/4)
 	for i := range model.Tiles {
 		tile := model.Tiles[i]
 		if tile.Block <= 0 || tile.Build == nil {
@@ -6231,18 +6243,24 @@ func buildSyncSnapshotFromModel(model *world.WorldModel) []world.BuildSyncState 
 			hp = tile.Build.Health
 		}
 		team := tile.Team
-		if tile.Build != nil && tile.Build.Team != 0 {
+		if tile.Build != nil {
 			team = tile.Build.Team
 		}
-		out = append(out, world.BuildSyncState{
-			Pos:      protocol.PackPoint2(int32(tile.X), int32(tile.Y)),
-			X:        int32(tile.X),
-			Y:        int32(tile.Y),
-			BlockID:  int16(tile.Block),
-			Team:     team,
-			Rotation: tile.Rotation,
-			Health:   hp,
-		})
+		entry := world.BuildSyncSnapshotEntry{
+			BuildSyncState: world.BuildSyncState{
+				Pos:      protocol.PackPoint2(int32(tile.X), int32(tile.Y)),
+				X:        int32(tile.X),
+				Y:        int32(tile.Y),
+				BlockID:  int16(tile.Block),
+				Team:     team,
+				Rotation: tile.Rotation,
+				Health:   hp,
+			},
+		}
+		if len(tile.Build.Config) > 0 {
+			entry.Config = append([]byte(nil), tile.Build.Config...)
+		}
+		out = append(out, entry)
 	}
 	return out
 }
@@ -6266,7 +6284,14 @@ func decodeTileConfigValue(tile *world.Tile) (any, bool) {
 	if tile == nil || tile.Build == nil || len(tile.Build.Config) == 0 {
 		return nil, false
 	}
-	value, err := protocol.ReadObject(protocol.NewReader(tile.Build.Config), false, nil)
+	return decodeTileConfigBytes(tile.Build.Config)
+}
+
+func decodeTileConfigBytes(raw []byte) (any, bool) {
+	if len(raw) == 0 {
+		return nil, false
+	}
+	value, err := protocol.ReadObject(protocol.NewReader(raw), false, nil)
 	if err != nil {
 		return nil, false
 	}
@@ -6294,19 +6319,7 @@ func modelTileIsConstructLike(model *world.WorldModel, pos int32) bool {
 	return isConstructLikeBlockName(model.BlockNames[int16(tile.Block)])
 }
 
-func sameTileConfigAtPos(baseModel, liveModel *world.WorldModel, pos int32) bool {
-	baseTile, baseOK := tileAtPacked(baseModel, pos)
-	liveTile, liveOK := tileAtPacked(liveModel, pos)
-	if !baseOK && !liveOK {
-		return true
-	}
-	var baseCfg, liveCfg []byte
-	if baseOK && baseTile != nil && baseTile.Build != nil {
-		baseCfg = baseTile.Build.Config
-	}
-	if liveOK && liveTile != nil && liveTile.Build != nil {
-		liveCfg = liveTile.Build.Config
-	}
+func sameConfigBytes(baseCfg, liveCfg []byte) bool {
 	return bytes.Equal(baseCfg, liveCfg)
 }
 
@@ -6331,11 +6344,8 @@ func buildRuntimeRulesRaw(wld *world.World, mapPath string) string {
 		}
 		return string(raw)
 	}
-	model := wld.CloneModel()
-	if model != nil && model.Tags != nil {
-		if raw := strings.TrimSpace(model.Tags["rules"]); raw != "" {
-			_ = json.Unmarshal([]byte(raw), &merged)
-		}
+	if raw := wld.RulesTagRaw(); raw != "" {
+		_ = json.Unmarshal([]byte(raw), &merged)
 	}
 	rulesMgr := wld.GetRulesManager()
 	if rulesMgr == nil {
@@ -7404,23 +7414,37 @@ func isMSAVPath(path string) bool {
 	return strings.HasSuffix(lower, ".msav") || strings.HasSuffix(lower, ".msav.msav")
 }
 
+func (c *worldCache) fetchRemote(path string) (coreio.SnapshotResult, error) {
+	if c == nil || c.backend == nil {
+		return coreio.SnapshotResult{}, fmt.Errorf("remote world cache unavailable")
+	}
+	res, err := c.backend.GetWorldCache(path)
+	if err != nil {
+		return coreio.SnapshotResult{}, err
+	}
+	if _, inspectErr := worldstream.InspectWorldStreamPayload(res.Data); inspectErr != nil {
+		return coreio.SnapshotResult{}, fmt.Errorf("inspect remote worldstream payload: %w", inspectErr)
+	}
+	c.mu.Lock()
+	c.path = canonicalRuntimePath(path)
+	if info, statErr := os.Stat(resolveRuntimePath(path)); statErr == nil {
+		c.modTime = info.ModTime()
+	}
+	c.data = nil
+	c.baseModel = nil
+	c.corePos = res.CorePos
+	c.corePosOK = res.CorePosOK
+	c.mu.Unlock()
+	return res, nil
+}
+
 func (c *worldCache) get(path string) ([]byte, error) {
-	if c != nil && c.backend != nil && !isMSAVPath(path) {
-		if res, err := c.backend.GetWorldCache(path); err == nil {
-			if _, inspectErr := worldstream.InspectWorldStreamPayload(res.Data); inspectErr == nil {
-				c.mu.Lock()
-				c.path = canonicalRuntimePath(path)
-				if info, statErr := os.Stat(resolveRuntimePath(path)); statErr == nil {
-					c.modTime = info.ModTime()
-				}
-				c.data = append([]byte(nil), res.Data...)
-				c.baseModel = res.BaseModel
-				c.corePos = res.CorePos
-				c.corePosOK = res.CorePosOK
-				c.mu.Unlock()
-				return res.Data, nil
-			}
+	if c != nil && c.backend != nil {
+		res, err := c.fetchRemote(path)
+		if err != nil {
+			return nil, err
 		}
+		return res.Data, nil
 	}
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -7464,6 +7488,13 @@ func (c *worldCache) get(path string) ([]byte, error) {
 }
 
 func (c *worldCache) spawnPos(path string) (protocol.Point2, bool, error) {
+	if c != nil && c.backend != nil {
+		res, err := c.fetchRemote(path)
+		if err != nil {
+			return protocol.Point2{}, false, err
+		}
+		return res.CorePos, res.CorePosOK, nil
+	}
 	if _, err := c.get(path); err != nil {
 		return protocol.Point2{}, false, err
 	}
@@ -7474,6 +7505,22 @@ func (c *worldCache) model(path string) *world.WorldModel {
 	if c == nil {
 		return nil
 	}
+	if c.backend != nil {
+		res, err := c.fetchRemote(path)
+		if err != nil || len(res.Data) == 0 {
+			return nil
+		}
+		if model, merr := worldstream.LoadWorldModelFromWorldStreamPayload(res.Data, c.content); merr == nil {
+			return model
+		}
+		actualPath := resolveRuntimePath(canonicalRuntimePath(path))
+		if isMSAVPath(path) {
+			if model, merr := worldstream.LoadWorldModelFromMSAV(actualPath, c.content); merr == nil {
+				return model
+			}
+		}
+		return nil
+	}
 	if _, err := c.get(path); err != nil {
 		return nil
 	}
@@ -7482,7 +7529,7 @@ func (c *worldCache) model(path string) *world.WorldModel {
 	return c.baseModel
 }
 
-func buildInitialWorldDataPayload(conn *netserver.Conn, wld *world.World, cache *worldCache, path string) ([]byte, error) {
+func buildInitialWorldDataPayload(conn *netserver.Conn, wld *world.World, cache *worldCache, path string, ioCore *coreio.Core2) ([]byte, error) {
 	if cache == nil {
 		return nil, fmt.Errorf("world cache unavailable")
 	}
@@ -7490,26 +7537,73 @@ func buildInitialWorldDataPayload(conn *netserver.Conn, wld *world.World, cache 
 	if conn != nil && conn.PlayerID() != 0 {
 		playerID = conn.PlayerID()
 	}
-	buildSnapshotPayload := func(model *world.WorldModel, snap world.Snapshot) ([]byte, bool) {
-		if model == nil {
-			return nil, false
+	strictRemoteRewrite := ioCore != nil && ioCore.HasRemote()
+	rewritePayload := func(payload []byte, snap world.Snapshot, rewriteRuntime bool) ([]byte, error) {
+		if len(payload) == 0 {
+			return nil, fmt.Errorf("empty worldstream payload")
 		}
-		payload, err := worldstream.BuildWorldStreamFromModelSnapshot(model, playerID, snap)
-		if err != nil || len(payload) == 0 {
-			return nil, false
+		rules := buildRuntimeRulesRaw(wld, path)
+		if ioCore != nil {
+			wave := int32(0)
+			waveTimeTicks := float32(0)
+			tick := float64(0)
+			patchPlayerID := int32(0)
+			if rewriteRuntime {
+				wave = snap.Wave
+				waveTimeTicks = snap.WaveTimeTicks()
+				tick = float64(snap.Tick)
+				patchPlayerID = playerID
+			}
+			patched, err := ioCore.RewriteWorldStreamPayload(payload, patchPlayerID, rules, wave, waveTimeTicks, tick)
+			if err == nil && len(patched) > 0 {
+				return patched, nil
+			}
+			if strictRemoteRewrite {
+				if err != nil {
+					return nil, err
+				}
+				return nil, fmt.Errorf("core2 returned empty rewritten worldstream payload")
+			}
 		}
-		if patched, perr := worldstream.RewriteRulesInWorldStream(payload, buildRuntimeRulesRaw(wld, path)); perr == nil {
+		if rewriteRuntime {
+			if patched, perr := worldstream.RewriteRuntimeStateInWorldStream(payload, snap.Wave, snap.WaveTimeTicks(), float64(snap.Tick), playerID); perr == nil && len(patched) > 0 {
+				payload = patched
+			} else if playerID != 0 {
+				if patched, perr := worldstream.RewritePlayerIDInWorldStream(payload, playerID); perr == nil && len(patched) > 0 {
+					payload = patched
+				}
+			}
+		} else if strings.TrimSpace(rules) != "" {
+			// keep payload untouched here; rules patch runs just below
+		}
+		if patched, perr := worldstream.RewriteRulesInWorldStream(payload, rules); perr == nil && len(patched) > 0 {
 			payload = patched
 		}
 		if _, inspectErr := worldstream.InspectWorldStreamPayload(payload); inspectErr != nil {
-			return nil, false
+			return nil, inspectErr
 		}
-		return payload, true
+		return payload, nil
+	}
+	buildSnapshotPayload := func(model *world.WorldModel, snap world.Snapshot) ([]byte, bool, error) {
+		if model == nil {
+			return nil, false, nil
+		}
+		payload, err := worldstream.BuildWorldStreamFromModelSnapshot(model, playerID, snap)
+		if err != nil || len(payload) == 0 {
+			return nil, false, err
+		}
+		patched, rerr := rewritePayload(payload, snap, false)
+		if rerr != nil {
+			return nil, false, rerr
+		}
+		return patched, true, nil
 	}
 	if wld != nil {
 		snap := wld.Snapshot()
 		if liveModel := wld.CloneModelForWorldStream(); liveModel != nil {
-			if payload, ok := buildSnapshotPayload(liveModel, snap); ok {
+			if payload, ok, err := buildSnapshotPayload(liveModel, snap); err != nil {
+				return nil, err
+			} else if ok {
 				if conn != nil {
 					conn.SetLiveWorldStream(true)
 				}
@@ -7528,14 +7622,9 @@ func buildInitialWorldDataPayload(conn *netserver.Conn, wld *world.World, cache 
 		}
 
 		snap := wld.Snapshot()
-		if patched, perr := worldstream.RewriteRuntimeStateInWorldStream(payload, snap.Wave, snap.WaveTimeTicks(), float64(snap.Tick), playerID); perr == nil {
-			payload = patched
-		} else if conn != nil && conn.PlayerID() != 0 {
-			if patched, perr := worldstream.RewritePlayerIDInWorldStream(payload, conn.PlayerID()); perr == nil {
-				payload = patched
-			}
-		}
-		if patched, perr := worldstream.RewriteRulesInWorldStream(payload, buildRuntimeRulesRaw(wld, path)); perr == nil {
+		if patched, rerr := rewritePayload(payload, snap, true); rerr != nil {
+			return nil, rerr
+		} else if len(patched) > 0 {
 			payload = patched
 		}
 		return payload, nil
@@ -7544,7 +7633,9 @@ func buildInitialWorldDataPayload(conn *netserver.Conn, wld *world.World, cache 
 	if wld != nil {
 		snap := wld.Snapshot()
 		if baseModel := wld.CloneModelForWorldStream(); baseModel != nil {
-			if payload, ok := buildSnapshotPayload(baseModel, snap); ok {
+			if payload, ok, err := buildSnapshotPayload(baseModel, snap); err != nil {
+				return nil, err
+			} else if ok {
 				return payload, nil
 			}
 		}

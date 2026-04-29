@@ -209,6 +209,42 @@ func TestBlockSyncSnapshotsLiveOnlyIgnoresInlineMapSyncData(t *testing.T) {
 	}
 }
 
+func TestBlockSyncSnapshotsLiveOnlyIncludesDerelictStorage(t *testing.T) {
+	w := New(Config{TPS: 60})
+	model := NewWorldModel(16, 16)
+	model.BlockNames = map[int16]string{
+		500: "container",
+	}
+	tile, err := model.TileAt(5, 6)
+	if err != nil || tile == nil {
+		t.Fatalf("container tile lookup failed: %v", err)
+	}
+	tile.Block = 500
+	tile.Team = 0
+	tile.Build = &Building{
+		Block:     500,
+		Team:      0,
+		X:         5,
+		Y:         6,
+		Health:    90,
+		MaxHealth: 90,
+		Items:     []ItemStack{{Item: copperItemID, Amount: 12}},
+	}
+	w.SetModel(model)
+
+	snaps := w.BlockSyncSnapshotsLiveOnly()
+	if len(snaps) != 1 {
+		t.Fatalf("expected one derelict container snapshot, got %d", len(snaps))
+	}
+	base, _ := decodeBlockSyncBase(t, snaps[0].Data)
+	if base.Team != 0 {
+		t.Fatalf("expected derelict team 0 in block snapshot, got %d", base.Team)
+	}
+	if got := base.Items[copperItemID]; got != 12 {
+		t.Fatalf("expected derelict container copper=12, got %d", got)
+	}
+}
+
 func TestBlockSyncSnapshotsIgnoreItemTurretInlineMapTailWithoutAmmoChain(t *testing.T) {
 	w := New(Config{TPS: 60})
 	model := NewWorldModel(16, 16)

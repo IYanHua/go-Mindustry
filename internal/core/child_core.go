@@ -8,6 +8,8 @@ import (
 	"os"
 	"strings"
 	"time"
+
+	"mdt-server/internal/config"
 )
 
 type ipcStatsResponse struct {
@@ -67,7 +69,35 @@ type ipcPolicyResponse struct {
 	CoreShard   int  `json:"core_shard"`
 }
 
-func RunChildCore(role, endpoint string, parentPID int) error {
+type ipcCore2PersistenceRequest struct {
+	Action    string `json:"action"`
+	Path      string `json:"path"`
+	StateData []byte `json:"state_data"`
+	WorldData []byte `json:"world_data"`
+}
+
+type ipcCore2PersistenceResponse struct {
+	StateData []byte `json:"state_data"`
+	WorldData []byte `json:"world_data"`
+}
+
+type ipcCore2WorldStreamRequest struct {
+	Action        string            `json:"action"`
+	Path          string            `json:"path"`
+	PlayerID      int32             `json:"player_id"`
+	Tags          map[string]string `json:"tags"`
+	ModelData     []byte            `json:"model_data"`
+	Wave          int32             `json:"wave"`
+	WaveTimeTicks float32           `json:"wave_time_ticks"`
+	Tick          float64           `json:"tick"`
+	Rules         string            `json:"rules"`
+}
+
+type ipcCore2WorldStreamResponse struct {
+	Data []byte `json:"data"`
+}
+
+func RunChildCore(role, endpoint string, parentPID int, persistCfg ...config.PersistConfig) error {
 	role = strings.ToLower(strings.TrimSpace(role))
 	if role == "" {
 		return fmt.Errorf("child core role is empty")
@@ -83,10 +113,15 @@ func RunChildCore(role, endpoint string, parentPID int) error {
 	if parentPID > 0 {
 		go watchParentProcess(parentPID, stopParentWatch)
 	}
+	core2PersistCfg := config.PersistConfig{}
+	if len(persistCfg) > 0 {
+		core2PersistCfg = persistCfg[0]
+	}
 
 	switch role {
 	case "core2":
 		c2 := NewCore2(Config{Name: "core2-child", MessageBuf: 30000, WorkerCount: 2})
+		c2.SetPersistConfig(core2PersistCfg)
 		c2.Start()
 		defer c2.Stop()
 		return serveChildCore(role, ln, func(method string, payload json.RawMessage) (any, error) {
@@ -96,6 +131,55 @@ func RunChildCore(role, endpoint string, parentPID int) error {
 			case "stats":
 				received, processed, dropped, queueSize, latency := c2.Stats()
 				return ipcStatsResponse{Received: received, Processed: processed, Dropped: dropped, QueueSize: queueSize, LatencyMs: latency}, nil
+			case "core2.save_state", "core2.load_state", "core2.save_world", "core2.load_world":
+				var req ipcCore2PersistenceRequest
+				if err := json.Unmarshal(payload, &req); err != nil {
+					return nil, err
+				}
+				ch := make(chan PersistenceResult, 1)
+				msg := &PersistenceMessage{
+					Action:     req.Action,
+					Path:       req.Path,
+					StateData:  req.StateData,
+					WorldData:  req.WorldData,
+					ResultChan: ch,
+				}
+				if !c2.Send(msg) {
+					return nil, fmt.Errorf("core2 queue full for %s", req.Action)
+				}
+				res := <-ch
+				if res.Error != nil {
+					return nil, res.Error
+				}
+				return ipcCore2PersistenceResponse{
+					StateData: res.StateData,
+					WorldData: res.WorldData,
+				}, nil
+			case "core2.load_model", "core2.save_snapshot", "core2.rewrite_player":
+				var req ipcCore2WorldStreamRequest
+				if err := json.Unmarshal(payload, &req); err != nil {
+					return nil, err
+				}
+				if !c2.Send(&WorldStreamMessage{
+					Action:    req.Action,
+					Path:      req.Path,
+					PlayerID:  req.PlayerID,
+					Tags:      req.Tags,
+					ModelData: req.ModelData,
+				}) {
+					return nil, fmt.Errorf("core2 queue full for %s", req.Action)
+				}
+				return map[string]any{"ok": true}, nil
+			case "core2.rewrite_worldstream":
+				var req ipcCore2WorldStreamRequest
+				if err := json.Unmarshal(payload, &req); err != nil {
+					return nil, err
+				}
+				patched, err := rewriteWorldStreamPayload(req.ModelData, req.PlayerID, req.Rules, req.Wave, req.WaveTimeTicks, req.Tick)
+				if err != nil {
+					return nil, err
+				}
+				return ipcCore2WorldStreamResponse{Data: patched}, nil
 			case "shutdown":
 				return map[string]any{"ok": true}, io.EOF
 			default:
@@ -104,6 +188,7 @@ func RunChildCore(role, endpoint string, parentPID int) error {
 		})
 	case "core3":
 		c3 := NewCore3(Config{Name: "core3-child", MessageBuf: 1024, WorkerCount: 1})
+		c3.SetCacheBaseModel(false)
 		c3.Start()
 		defer c3.Stop()
 		return serveChildCore(role, ln, func(method string, payload json.RawMessage) (any, error) {
@@ -270,7 +355,7 @@ func watchParentProcess(parentPID int, stop <-chan struct{}) {
 			if parentPID <= 0 {
 				return
 			}
-			if proc, err := os.FindProcess(parentPID); err != nil || proc == nil {
+			if !parentProcessAlive(parentPID) {
 				os.Exit(0)
 			}
 		}

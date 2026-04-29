@@ -124,7 +124,7 @@ func (w *World) filterSyncedBuildingsByRouteLocked(positions []int32, itemTurret
 			continue
 		}
 		tile := &w.model.Tiles[pos]
-		if tile == nil || !isCenterBuildingTile(tile) || tile.Build.Team == 0 {
+		if tile == nil || !isCenterBuildingTile(tile) {
 			continue
 		}
 
@@ -223,7 +223,7 @@ func (w *World) PeriodicBlockSyncSnapshotsLiveOnly() []BlockSyncSnapshot {
 			continue
 		}
 		tile := &w.model.Tiles[pos]
-		if tile == nil || tile.Block == 0 || tile.Build == nil || tile.Build.Team == 0 {
+		if tile == nil || tile.Block == 0 || tile.Build == nil {
 			continue
 		}
 		name := strings.ToLower(strings.TrimSpace(w.blockNameByID(int16(tile.Block))))
@@ -340,7 +340,7 @@ func (w *World) TurretBlockSyncSnapshotsLiveOnly() []BlockSyncSnapshot {
 			continue
 		}
 		tile := &w.model.Tiles[pos]
-		if tile.Build == nil || tile.Block == 0 || tile.Build.Health <= 0 || tile.Build.Team == 0 {
+		if tile.Build == nil || tile.Block == 0 || tile.Build.Health <= 0 {
 			continue
 		}
 		name := strings.ToLower(strings.TrimSpace(w.blockNameByID(int16(tile.Block))))
@@ -359,7 +359,7 @@ func (w *World) unitFactoryBlockSyncSnapshotsLocked(allowInlineFallback bool) []
 			continue
 		}
 		tile := &w.model.Tiles[pos]
-		if tile == nil || tile.Block == 0 || tile.Build == nil || tile.Build.Team == 0 {
+		if tile == nil || tile.Block == 0 || tile.Build == nil {
 			continue
 		}
 		if classifyBlockSyncKind(strings.ToLower(strings.TrimSpace(w.blockNameByID(int16(tile.Block))))) != blockSyncUnitFactory {
@@ -395,7 +395,7 @@ func (w *World) payloadProcessorBlockSyncSnapshotsLocked(allowInlineFallback boo
 			continue
 		}
 		tile := &w.model.Tiles[pos]
-		if tile == nil || tile.Block == 0 || tile.Build == nil || tile.Build.Team == 0 {
+		if tile == nil || tile.Block == 0 || tile.Build == nil {
 			continue
 		}
 		if !isPayloadProcessorBlockSyncKind(classifyBlockSyncKind(strings.ToLower(strings.TrimSpace(w.blockNameByID(int16(tile.Block)))))) {
@@ -430,7 +430,7 @@ func (w *World) RelatedBlockSyncPackedPositions(packedPos int32) []int32 {
 		return nil
 	}
 	tile := &w.model.Tiles[pos]
-	if tile == nil || tile.Block == 0 || tile.Build == nil || tile.Build.Team == 0 {
+	if tile == nil || tile.Block == 0 || tile.Build == nil {
 		return nil
 	}
 
@@ -449,7 +449,7 @@ func (w *World) RelatedBlockSyncPackedPositions(packedPos int32) []int32 {
 			return
 		}
 		other := &w.model.Tiles[index]
-		if other == nil || !isCenterBuildingTile(other) || other.Build.Team == 0 {
+		if other == nil || !isCenterBuildingTile(other) {
 			return
 		}
 		packed := packTilePos(other.X, other.Y)
@@ -496,7 +496,7 @@ func (w *World) blockSyncSnapshotsForTilePositionsLocked(tilePositions []int32, 
 			continue
 		}
 		tile := &w.model.Tiles[pos]
-		if tile == nil || !isCenterBuildingTile(tile) || tile.Build.Team == 0 {
+		if tile == nil || !isCenterBuildingTile(tile) {
 			continue
 		}
 		name := strings.ToLower(strings.TrimSpace(w.blockNameByID(int16(tile.Block))))
@@ -1516,7 +1516,7 @@ func (w *World) blockSyncPowerLinkPresentLocked(pos, link int32) bool {
 	if from.Build == nil || to.Build == nil || from.Block == 0 || to.Block == 0 {
 		return false
 	}
-	if from.Build.Team == 0 || from.Build.Team != to.Build.Team {
+	if from.Build.Team != to.Build.Team {
 		return false
 	}
 	if !w.isPowerRelevantBuildingLocked(from) || !w.isPowerRelevantBuildingLocked(to) {

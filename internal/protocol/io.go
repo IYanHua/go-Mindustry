@@ -23,10 +23,16 @@ func NewReaderWithContext(b []byte, ctx *TypeIOContext) *Reader {
 }
 
 func (rd *Reader) Remaining() int {
+	if rd == nil || rd.r == nil {
+		return 0
+	}
 	return rd.r.Len()
 }
 
 func (rd *Reader) ReadByte() (byte, error) {
+	if rd == nil || rd.r == nil {
+		return 0, io.ErrUnexpectedEOF
+	}
 	return rd.r.ReadByte()
 }
 
@@ -45,30 +51,45 @@ func (rd *Reader) ReadBool() (bool, error) {
 
 func (rd *Reader) ReadInt16() (int16, error) {
 	var v int16
+	if rd == nil || rd.r == nil {
+		return 0, io.ErrUnexpectedEOF
+	}
 	err := binary.Read(rd.r, charset, &v)
 	return v, err
 }
 
 func (rd *Reader) ReadUint16() (uint16, error) {
 	var v uint16
+	if rd == nil || rd.r == nil {
+		return 0, io.ErrUnexpectedEOF
+	}
 	err := binary.Read(rd.r, charset, &v)
 	return v, err
 }
 
 func (rd *Reader) ReadInt32() (int32, error) {
 	var v int32
+	if rd == nil || rd.r == nil {
+		return 0, io.ErrUnexpectedEOF
+	}
 	err := binary.Read(rd.r, charset, &v)
 	return v, err
 }
 
 func (rd *Reader) ReadInt64() (int64, error) {
 	var v int64
+	if rd == nil || rd.r == nil {
+		return 0, io.ErrUnexpectedEOF
+	}
 	err := binary.Read(rd.r, charset, &v)
 	return v, err
 }
 
 func (rd *Reader) ReadFloat32() (float32, error) {
 	var v uint32
+	if rd == nil || rd.r == nil {
+		return 0, io.ErrUnexpectedEOF
+	}
 	if err := binary.Read(rd.r, charset, &v); err != nil {
 		return 0, err
 	}
@@ -77,6 +98,9 @@ func (rd *Reader) ReadFloat32() (float32, error) {
 
 func (rd *Reader) ReadFloat64() (float64, error) {
 	var v uint64
+	if rd == nil || rd.r == nil {
+		return 0, io.ErrUnexpectedEOF
+	}
 	if err := binary.Read(rd.r, charset, &v); err != nil {
 		return 0, err
 	}
@@ -84,6 +108,9 @@ func (rd *Reader) ReadFloat64() (float64, error) {
 }
 
 func (rd *Reader) ReadBytes(n int) ([]byte, error) {
+	if rd == nil || rd.r == nil {
+		return nil, io.ErrUnexpectedEOF
+	}
 	buf := make([]byte, n)
 	_, err := io.ReadFull(rd.r, buf)
 	return buf, err

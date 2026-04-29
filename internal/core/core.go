@@ -5,10 +5,12 @@ import (
 	"fmt"
 	"os"
 	"runtime"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
 
+	"mdt-server/internal/config"
 	"mdt-server/internal/persist"
 	"mdt-server/internal/storage"
 	"mdt-server/internal/worldstream"
@@ -41,6 +43,9 @@ type Core2 struct {
 	conns         map[int32]ConnectionMessage
 	modMu         sync.RWMutex
 	mods          map[string]*managedMod
+	persistCfg    config.PersistConfig
+	remoteMu      sync.RWMutex
+	remote        *remoteCore2Client
 	stateProvider func() persist.State
 	onPacketIn    func(*PacketMessage)
 	onPacketOut   func(*PacketMessage)
@@ -640,16 +645,14 @@ func (c2 *Core2) handleSaveState(m *PersistenceMessage) {
 		state = s
 	}
 
-	// 从 ServerCore 获取配置
-	if sc, ok := c2.serverCore.Load().(*ServerCore); ok {
-		// 保存状态到 JSON
+	if persistCfg, ok := c2.resolvePersistConfig(); ok {
 		state.SavedAt = time.Now().UTC().Format(time.RFC3339)
-		err := persist.Save(sc.persistCfg, state)
+		err := persist.Save(persistCfg, state)
 		if err != nil {
 			result.Error = err
 		}
 	} else {
-		result.Error = fmt.Errorf("server core not initialized")
+		result.Error = fmt.Errorf("persist config not initialized")
 	}
 
 	if m.ResultChan != nil {
@@ -661,16 +664,15 @@ func (c2 *Core2) handleSaveState(m *PersistenceMessage) {
 func (c2 *Core2) handleLoadState(m *PersistenceMessage) {
 	result := PersistenceResult{}
 
-	// 从 ServerCore 获取配置
-	if sc, ok := c2.serverCore.Load().(*ServerCore); ok {
-		st, ok, err := persist.Load(sc.persistCfg)
+	if persistCfg, ok := c2.resolvePersistConfig(); ok {
+		st, ok, err := persist.Load(persistCfg)
 		if err != nil {
 			result.Error = err
 		} else if ok {
 			result.StateData = []byte(fmt.Sprintf("wave=%d,tick=%d", st.Wave, st.Tick))
 		}
 	} else {
-		result.Error = fmt.Errorf("server core not initialized")
+		result.Error = fmt.Errorf("persist config not initialized")
 	}
 
 	if m.ResultChan != nil {
@@ -715,6 +717,17 @@ func (c2 *Core2) handleLoadWorld(m *PersistenceMessage) {
 
 // Send 发送消息到 IO Core
 func (c2 *Core2) Send(msg Message) bool {
+	if c2 == nil || msg == nil {
+		return false
+	}
+	if remote := c2.remoteClient(); remote != nil {
+		switch m := msg.(type) {
+		case *PersistenceMessage:
+			return c2.sendRemotePersistence(remote, m)
+		case *WorldStreamMessage:
+			return c2.sendRemoteWorldStream(remote, m)
+		}
+	}
 	c2.stats.AddQueueSize(1)
 	select {
 	case c2.messages <- msg:
@@ -744,9 +757,32 @@ func (c2 *Core2) SetRecorder(rec storage.Recorder) {
 	c2.recorder = rec
 }
 
+// SetPersistConfig 设置 Core2 的持久化配置。
+func (c2 *Core2) SetPersistConfig(cfg config.PersistConfig) {
+	c2.persistCfg = cfg
+}
+
+func (c2 *Core2) HasRemote() bool {
+	return c2.remoteClient() != nil
+}
+
 // SetStateProvider 设置持久化状态提供器。
 func (c2 *Core2) SetStateProvider(fn func() persist.State) {
 	c2.stateProvider = fn
+}
+
+// AttachRemote 设置 Core2 的子进程远端客户端。
+func (c2 *Core2) AttachRemote(client *ipcClient) {
+	if c2 == nil {
+		return
+	}
+	c2.remoteMu.Lock()
+	defer c2.remoteMu.Unlock()
+	if client == nil {
+		c2.remote = nil
+		return
+	}
+	c2.remote = &remoteCore2Client{client: client}
 }
 
 // SetPacketHandlers 设置 Core2 包处理回调。
@@ -775,6 +811,15 @@ func (c2 *Core2) ConnectionCount() int {
 
 // Stats 获取 IO Core 统计信息
 func (c2 *Core2) Stats() (int64, int64, int64, int64, int64) {
+	if c2 == nil {
+		return 0, 0, 0, 0, 0
+	}
+	if remote := c2.remoteClient(); remote != nil {
+		received, processed, dropped, queueSize, latency, err := remote.stats()
+		if err == nil {
+			return received, processed, dropped, queueSize, latency
+		}
+	}
 	return c2.stats.GetStats()
 }
 
@@ -787,6 +832,128 @@ func (c2 *Core2) updateStats() {
 		c2.stats.lastUpdate = now
 	}
 	c2.stats.mu.Unlock()
+}
+
+func (c2 *Core2) resolvePersistConfig() (config.PersistConfig, bool) {
+	if c2 == nil {
+		return config.PersistConfig{}, false
+	}
+	if c2.persistCfg.Enabled || c2.persistCfg.Directory != "" || c2.persistCfg.File != "" || c2.persistCfg.MSAVDir != "" || c2.persistCfg.MSAVFile != "" {
+		return c2.persistCfg, true
+	}
+	if sc, ok := c2.serverCore.Load().(*ServerCore); ok && sc != nil {
+		return sc.persistCfg, true
+	}
+	return config.PersistConfig{}, false
+}
+
+func (c2 *Core2) sendRemotePersistence(remote *remoteCore2Client, m *PersistenceMessage) bool {
+	if c2 == nil || remote == nil || m == nil {
+		return false
+	}
+	req := ipcCore2PersistenceRequest{
+		Action:    m.Action,
+		Path:      m.Path,
+		StateData: append([]byte(nil), m.StateData...),
+		WorldData: append([]byte(nil), m.WorldData...),
+	}
+	resultCh := m.ResultChan
+	go func() {
+		res, err := remote.persistence(req)
+		if err != nil {
+			res.Error = err
+		}
+		if resultCh != nil {
+			resultCh <- res
+		}
+	}()
+	return true
+}
+
+func (c2 *Core2) sendRemoteWorldStream(remote *remoteCore2Client, m *WorldStreamMessage) bool {
+	if c2 == nil || remote == nil || m == nil {
+		return false
+	}
+	req := ipcCore2WorldStreamRequest{
+		Action:    m.Action,
+		Path:      m.Path,
+		PlayerID:  m.PlayerID,
+		Tags:      cloneStringMap(m.Tags),
+		ModelData: append([]byte(nil), m.ModelData...),
+	}
+	go func() {
+		if err := remote.worldStream(req); err != nil {
+			fmt.Printf("[Core2 %s] remote worldstream %s failed: %v\n", c2.name, m.Action, err)
+		}
+	}()
+	return true
+}
+
+func cloneStringMap(src map[string]string) map[string]string {
+	if len(src) == 0 {
+		return nil
+	}
+	dst := make(map[string]string, len(src))
+	for k, v := range src {
+		dst[k] = v
+	}
+	return dst
+}
+
+func rewriteWorldStreamPayload(payload []byte, playerID int32, rules string, wave int32, waveTimeTicks float32, tick float64) ([]byte, error) {
+	if len(payload) == 0 {
+		return nil, fmt.Errorf("empty worldstream payload")
+	}
+	patched := append([]byte(nil), payload...)
+	if wave != 0 || waveTimeTicks != 0 || tick != 0 || playerID != 0 {
+		if next, err := worldstream.RewriteRuntimeStateInWorldStream(patched, wave, waveTimeTicks, tick, playerID); err == nil && len(next) > 0 {
+			patched = next
+		} else if playerID != 0 {
+			if next, perr := worldstream.RewritePlayerIDInWorldStream(patched, playerID); perr == nil && len(next) > 0 {
+				patched = next
+			}
+		}
+	} else if playerID != 0 {
+		if next, err := worldstream.RewritePlayerIDInWorldStream(patched, playerID); err == nil && len(next) > 0 {
+			patched = next
+		}
+	}
+	if strings.TrimSpace(rules) != "" {
+		if next, err := worldstream.RewriteRulesInWorldStream(patched, rules); err == nil && len(next) > 0 {
+			patched = next
+		}
+	}
+	if _, err := worldstream.InspectWorldStreamPayload(patched); err != nil {
+		return nil, err
+	}
+	return patched, nil
+}
+
+func (c2 *Core2) RewriteWorldStreamPayload(payload []byte, playerID int32, rules string, wave int32, waveTimeTicks float32, tick float64) ([]byte, error) {
+	if len(payload) == 0 {
+		return nil, fmt.Errorf("empty worldstream payload")
+	}
+	if remote := c2.remoteClient(); remote != nil {
+		return remote.rewriteWorldStream(ipcCore2WorldStreamRequest{
+			Action:        "rewrite_worldstream",
+			PlayerID:      playerID,
+			ModelData:     append([]byte(nil), payload...),
+			Wave:          wave,
+			WaveTimeTicks: waveTimeTicks,
+			Tick:          tick,
+			Rules:         rules,
+		})
+	}
+	return rewriteWorldStreamPayload(payload, playerID, rules, wave, waveTimeTicks, tick)
+}
+
+func (c2 *Core2) remoteClient() *remoteCore2Client {
+	if c2 == nil {
+		return nil
+	}
+	c2.remoteMu.RLock()
+	defer c2.remoteMu.RUnlock()
+	return c2.remote
 }
 
 func (c2 *Core2) recordEvent(ev storage.Event) {
