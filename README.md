@@ -3,8 +3,6 @@
     <img src="./md/logo.png" alt="月月岛科技 Logo" width="170" />
   </a>
 
-  <h1>mdt-server</h1>
-
   <p><strong>月月岛科技维护GO-Mindustry Build 157 服务端</strong></p>
 
   <p>
