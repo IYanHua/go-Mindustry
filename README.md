@@ -5,7 +5,7 @@
 
   <h1>mdt-server</h1>
 
-  <p><strong>月月岛科技维护的GO-Mindustry Build 157 服务端</strong></p>
+  <p><strong>月月岛科技维护GO-Mindustry Build 157 服务端</strong></p>
 
   <p>
     <a href="https://github.com/MonthZifang/YUEYUEDAO-TECH"><strong>查看月月岛科技详情</strong></a>
