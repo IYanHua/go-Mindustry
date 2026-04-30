@@ -21,13 +21,12 @@ js_dir = "mods/js"
 node_dir = "mods/node"
 
 [persist]
-directory = "data/state"
+directory = "data/snapshots/runtime"
 enabled = true
-file = "server-state.json"
+file = "latest.json"
+hot_interval_sec = 1
 interval_sec = 30
-msav_dir = "data/snapshots"
-msav_file = ""
-save_msav = true
+retention_days = 7
 
 [script]
 daily_gc_time = ""

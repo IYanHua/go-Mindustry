@@ -3,7 +3,7 @@ api.toml                 # API 配置，主要放监听地址与密钥
 config.toml              # 主配置文件，只放全局控制项与 authority_sync.strategy
 core.toml                # 核心配置，控制双核、TPS 与内存参数
 development.toml         # 开发调试配置，控制台与调试日志开关
-misc.toml                # 杂项配置，数据目录、mods、持久化、脚本等
+misc.toml                # 杂项配置，数据目录、mods、快照、脚本等
 personalization.toml     # 个性化显示配置
 server.toml              # 服务器基础信息配置，名称、简介、虚拟玩家数
 sundries.toml            # 附加日志配置，控制 logs 文件输出

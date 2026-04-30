@@ -91,13 +91,15 @@ type SyncConfig struct {
 }
 
 type PersistConfig struct {
-	Enabled     bool
-	Directory   string
-	File        string
-	IntervalSec int
-	SaveMSAV    bool
-	MSAVDir     string
-	MSAVFile    string
+	Enabled        bool
+	Directory      string
+	File           string
+	IntervalSec    int
+	HotIntervalSec int
+	RetentionDays  int
+	SaveMSAV       bool
+	MSAVDir        string
+	MSAVFile       string
 }
 
 type ModsConfig struct {
@@ -1162,6 +1164,12 @@ func applyINI(cfg *Config, d iniData) {
 	if v, ok := d.get("persist", "interval_sec"); ok {
 		cfg.Persist.IntervalSec = asInt(v, cfg.Persist.IntervalSec)
 	}
+	if v, ok := d.get("persist", "hot_interval_sec"); ok {
+		cfg.Persist.HotIntervalSec = asInt(v, cfg.Persist.HotIntervalSec)
+	}
+	if v, ok := d.get("persist", "retention_days"); ok {
+		cfg.Persist.RetentionDays = asInt(v, cfg.Persist.RetentionDays)
+	}
 	if v, ok := d.get("persist", "save_msav"); ok {
 		cfg.Persist.SaveMSAV = asBool(v, cfg.Persist.SaveMSAV)
 	}
@@ -1398,9 +1406,8 @@ func makeINI(cfg Config) iniData {
 	d.set("persist", "directory", cfg.Persist.Directory)
 	d.set("persist", "file", cfg.Persist.File)
 	d.set("persist", "interval_sec", strconv.Itoa(cfg.Persist.IntervalSec))
-	d.set("persist", "save_msav", boolToIni(cfg.Persist.SaveMSAV))
-	d.set("persist", "msav_dir", cfg.Persist.MSAVDir)
-	d.set("persist", "msav_file", cfg.Persist.MSAVFile)
+	d.set("persist", "hot_interval_sec", strconv.Itoa(cfg.Persist.HotIntervalSec))
+	d.set("persist", "retention_days", strconv.Itoa(cfg.Persist.RetentionDays))
 
 	d.set("script", "file", cfg.Script.File)
 	d.set("script", "daily_gc_time", cfg.Script.DailyGCTime)
@@ -1513,8 +1520,8 @@ func makeTOMLValueKinds() map[string]string {
 	add("bool", "data", "database_enabled")
 	add("bool", "mods", "enabled")
 	add("array", "mods", "expected_client_mods")
-	add("bool", "persist", "enabled", "save_msav")
-	add("int", "persist", "interval_sec")
+	add("bool", "persist", "enabled")
+	add("int", "persist", "interval_sec", "hot_interval_sec", "retention_days")
 	add("int", "admin", "player_limit", "recent_kick_seconds")
 	add("bool", "admin", "strict_identity", "allow_custom_clients", "whitelist_enabled")
 	add("array", "admin", "banned_names", "banned_subnets")
@@ -1736,6 +1743,22 @@ func normalize(cfg *Config) {
 	if strings.TrimSpace(cfg.Tracepoints.File) == "" {
 		cfg.Tracepoints.File = filepath.Join("logs", "tracepoints.jsonl")
 	}
+	if strings.TrimSpace(cfg.Persist.Directory) == "" {
+		cfg.Persist.Directory = filepath.Join("data", "snapshots", "runtime")
+	}
+	if strings.TrimSpace(cfg.Persist.File) == "" {
+		cfg.Persist.File = "latest.json"
+	}
+	if cfg.Persist.IntervalSec <= 0 {
+		cfg.Persist.IntervalSec = 30
+	}
+	if cfg.Persist.HotIntervalSec <= 0 {
+		cfg.Persist.HotIntervalSec = 1
+	}
+	if cfg.Persist.RetentionDays <= 0 {
+		cfg.Persist.RetentionDays = 7
+	}
+	cfg.Persist.SaveMSAV = false
 	if cfg.Admin.PlayerLimit < 0 {
 		cfg.Admin.PlayerLimit = 0
 	}
@@ -2096,7 +2119,7 @@ func Default() Config {
 		},
 		Runtime: RuntimeConfig{
 			Cores:            6,
-			SchedulerEnabled: false,
+			SchedulerEnabled: true,
 			VanillaProfiles:  "data/vanilla/profiles.json",
 			AssetsDir:        "assets",
 			WorldsDir:        "assets/worlds",
@@ -2140,13 +2163,15 @@ func Default() Config {
 			UseMapSyncDataFallback: false,
 		},
 		Persist: PersistConfig{
-			Enabled:     true,
-			Directory:   "data/state",
-			File:        "server-state.json",
-			IntervalSec: 30,
-			SaveMSAV:    true,
-			MSAVDir:     "data/snapshots",
-			MSAVFile:    "",
+			Enabled:        true,
+			Directory:      filepath.Join("data", "snapshots", "runtime"),
+			File:           "latest.json",
+			IntervalSec:    30,
+			HotIntervalSec: 1,
+			RetentionDays:  7,
+			SaveMSAV:       false,
+			MSAVDir:        "",
+			MSAVFile:       "",
 		},
 		Mods: ModsConfig{
 			Enabled:            false,

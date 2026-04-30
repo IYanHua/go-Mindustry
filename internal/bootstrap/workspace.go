@@ -101,7 +101,6 @@ func EnsureWorkspace(cfgPath string, cfg config.Config) (Result, error) {
 		cfg.Storage.Directory,
 		filepath.Join(cfg.Storage.Directory, "players"),
 		cfg.Persist.Directory,
-		cfg.Persist.MSAVDir,
 		cfg.Mods.Directory,
 		cfg.Mods.JSDir,
 		cfg.Mods.NodeDir,
@@ -137,19 +136,6 @@ func EnsureWorkspace(cfgPath string, cfg config.Config) (Result, error) {
 	}
 	if b, err := json.MarshalIndent(opsPayload, "", "  "); err == nil {
 		_ = writeIfMissing(cfg.Admin.OpsFile, b, 0o644)
-	}
-	statePayload := map[string]any{
-		"map_path":  "",
-		"wave_time": 0,
-		"wave":      0,
-		"tick":      0,
-		"time_data": 0,
-		"rand0":     0,
-		"rand1":     0,
-		"saved_at":  "",
-	}
-	if b, err := json.MarshalIndent(statePayload, "", "  "); err == nil {
-		_ = writeIfMissing(filepath.Join(cfg.Persist.Directory, cfg.Persist.File), b, 0o644)
 	}
 	if strings.TrimSpace(cfg.Runtime.VanillaProfiles) != "" {
 		_ = writeBundledRuntimeFileIfMissing(rootDir, cfg.Runtime.VanillaProfiles)

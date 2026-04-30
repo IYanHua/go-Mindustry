@@ -1,0 +1,17 @@
+{
+  "version": 1,
+  "kind": "cold",
+  "map_path": "assets\\worlds\\23157.msav",
+  "wave_time": 0,
+  "wave": 1,
+  "enemies": 0,
+  "paused": false,
+  "game_over": false,
+  "tick": 3599,
+  "time_data": 30,
+  "tps": 120,
+  "rand0": 8837429237295100968,
+  "rand1": 5171402993632106380,
+  "captured_at": "2026-04-30T08:56:18.4015047Z",
+  "saved_at": "2026-04-30T08:56:18.4028871Z"
+}

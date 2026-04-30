@@ -916,6 +916,42 @@ func printMapDetails(path string, model *world.WorldModel) {
 	fmt.Println("========================================")
 }
 
+func normalizeSnapshotWaveTimeSeconds(wld *world.World, waveTime float32) float32 {
+	if waveTime < 0 {
+		return 0
+	}
+	spacing := float32(120)
+	if wld != nil {
+		if rules := wld.GetRulesManager().Get(); rules != nil {
+			if rules.WaveSpacing > 0 {
+				spacing = rules.WaveSpacing
+			}
+			if rules.InitialWaveSpacing > spacing {
+				spacing = rules.InitialWaveSpacing
+			}
+		}
+	}
+	maxReasonable := spacing * 4
+	if maxReasonable < 120 {
+		maxReasonable = 120
+	}
+	if maxReasonable > 3600 {
+		maxReasonable = 3600
+	}
+	if waveTime <= maxReasonable {
+		return waveTime
+	}
+	// Older builds sometimes stored vanilla 60Hz wavetime ticks instead of
+	// this server's internal seconds. Convert only when it is clearly tick-scaled.
+	if waveTime > maxReasonable*8 {
+		seconds := waveTime / 60
+		if seconds > 0 && seconds <= maxReasonable {
+			return seconds
+		}
+	}
+	return spacing
+}
+
 func validateBuildVersion(build int) error {
 	if build != 157 {
 		return fmt.Errorf("仅支持 Mindustry build 157；请使用 -build 157")
@@ -1094,22 +1130,23 @@ func main() {
 	}
 
 	worldChoice := *worldArg
-	var persisted persist.State
-	var persistedOK bool
+	hotSnapshots := persist.NewHotSnapshotStore()
+	var restoredSnapshot persist.State
+	var restoredSnapshotOK bool
 	if cfg.Persist.Enabled {
 		if st, ok, err := persist.Load(cfg.Persist); err != nil {
-			log.Warn("persist load failed", logging.Field{Key: "error", Value: err.Error()})
-			startup.warn("持久化加载", err.Error())
+			log.Warn("cold snapshot load failed", logging.Field{Key: "error", Value: err.Error()})
+			startup.warn("冷快照加载", err.Error())
 		} else if ok {
-			persisted = st
-			persistedOK = true
+			restoredSnapshot = st
+			restoredSnapshotOK = true
 			if worldChoice == "random" && st.MapPath != "" {
 				worldChoice = st.MapPath
-				startup.ok("持久化地图恢复", st.MapPath)
+				startup.ok("冷快照地图恢复", st.MapPath)
 			}
 		}
 	} else {
-		startup.info("持久化", "未启用")
+		startup.info("快照", "未启用")
 	}
 
 	initialWorld, err := resolveWorldSelection(worldChoice)
@@ -1686,22 +1723,19 @@ func main() {
 	initMapVoteRuntime(listWorldMaps, resolveWorldSelection, applyVotedWorld, func(result mapVoteResult) {
 		handleMapVoteResult(srv, currentMapVoteRuntime(), result)
 	}, srv)
-	if persistedOK {
-		waveTime := persisted.WaveTime
-		if waveTime < 0 || waveTime > 3600 {
-			waveTime = 600
-		}
+	loadWorldModel(initialWorld)
+	if restoredSnapshotOK {
+		waveTime := normalizeSnapshotWaveTimeSeconds(wld, restoredSnapshot.WaveTime)
 		wld.ApplySnapshot(world.Snapshot{
 			WaveTime: waveTime,
-			Wave:     persisted.Wave,
-			TimeData: persisted.TimeData,
+			Wave:     restoredSnapshot.Wave,
+			TimeData: restoredSnapshot.TimeData,
 			Tps:      int8(gameTPS),
-			Rand0:    persisted.Rand0,
-			Rand1:    persisted.Rand1,
-			Tick:     persisted.Tick,
+			Rand0:    restoredSnapshot.Rand0,
+			Rand1:    restoredSnapshot.Rand1,
+			Tick:     restoredSnapshot.Tick,
 		})
 	}
-	loadWorldModel(initialWorld)
 	srv.MapNameFn = func() string {
 		path := state.get()
 		if path == "" {
@@ -2243,10 +2277,7 @@ func main() {
 		}()
 		t := time.NewTicker(time.Second / time.Duration(gameTPS))
 		defer t.Stop()
-		nextBlockSnapshotSync := time.Now()
-		nextUnitFactorySnapshotSync := time.Now()
-		nextTurretSnapshotSync := time.Now()
-		nextPayloadProcessorSnapshotSync := time.Now()
+		nextBlockSnapshotSync := time.Now().Add(6 * time.Second)
 		nextPlanPreviewSync := time.Now()
 		eventBuf := make([]world.EntityEvent, 0, 1024)
 		for range t.C {
@@ -2413,19 +2444,6 @@ func main() {
 				sort.Slice(positions, func(i, j int) bool { return positions[i] < positions[j] })
 				broadcastItemTurretAmmoSnapshotsForPacked(srv, wld, positions)
 			}
-			snapshotNow := time.Now()
-			if !snapshotNow.Before(nextUnitFactorySnapshotSync) {
-				broadcastUnitFactorySnapshots(srv, wld)
-				nextUnitFactorySnapshotSync = snapshotNow.Add(time.Second)
-			}
-			if !snapshotNow.Before(nextTurretSnapshotSync) {
-				broadcastTurretSnapshots(srv, wld)
-				nextTurretSnapshotSync = snapshotNow.Add(200 * time.Millisecond)
-			}
-			if !snapshotNow.Before(nextPayloadProcessorSnapshotSync) {
-				broadcastPayloadProcessorSnapshots(srv, wld)
-				nextPayloadProcessorSnapshotSync = snapshotNow.Add(time.Second)
-			}
 			if !now.Before(nextBlockSnapshotSync) {
 				broadcastBlockSnapshots(srv, wld)
 				nextBlockSnapshotSync = now.Add(6 * time.Second)
@@ -2436,6 +2454,7 @@ func main() {
 		}
 	}()
 	saveState := func() {}
+	flushColdSnapshot := func() {}
 	srv.OnChat = func(c *netserver.Conn, msg string) bool {
 		if c != nil && strings.TrimSpace(msg) != "" && shouldFileLogChat() {
 			detailLog.LogLine(fmt.Sprintf("%s [CHAT] from=%q player_id=%d uuid=%s ip=%s msg=%q",
@@ -2504,6 +2523,7 @@ func main() {
 				return true
 			}
 			saveState()
+			flushColdSnapshot()
 			saveOps()
 			srv.BroadcastChat("[accent]服务器正在保存并关闭...")
 			go func() {
@@ -2893,6 +2913,24 @@ func main() {
 		}
 		step()
 	}
+	captureRuntimeSnapshot := func(kind string) persist.State {
+		snap := wld.Snapshot()
+		return persist.State{
+			Version:  persist.SnapshotVersion,
+			Kind:     kind,
+			MapPath:  state.get(),
+			WaveTime: snap.WaveTime,
+			Wave:     snap.Wave,
+			Enemies:  snap.Enemies,
+			Paused:   snap.Paused,
+			GameOver: snap.GameOver,
+			Tick:     snap.Tick,
+			TimeData: snap.TimeData,
+			Tps:      snap.Tps,
+			Rand0:    snap.Rand0,
+			Rand1:    snap.Rand1,
+		}
+	}
 	if cfg.Core.DualCoreEnabled {
 		serverCore = coreio.NewServerCore(
 			time.Second/time.Duration(gameTPS),
@@ -2917,16 +2955,7 @@ func main() {
 		serverCore.Core2.SetVerboseNetLog(false)
 		serverCore.Core2.SetRecorder(recorder)
 		serverCore.SetPersistStateProvider(func() persist.State {
-			snap := wld.Snapshot()
-			return persist.State{
-				MapPath:  state.get(),
-				WaveTime: snap.WaveTime,
-				Wave:     snap.Wave,
-				Tick:     snap.Tick,
-				TimeData: snap.TimeData,
-				Rand0:    snap.Rand0,
-				Rand1:    snap.Rand1,
-			}
+			return captureRuntimeSnapshot("hot")
 		})
 		serverCore.SetGameTickFn(func(_ uint64, delta time.Duration) {
 			runWorldTick(delta)
@@ -3069,56 +3098,39 @@ func main() {
 	}
 	monitor := newStatusMonitor(srv, cfg, engine)
 	saveState = func() {}
+	flushColdSnapshot = func() {}
 	if cfg.Persist.Enabled {
 		saveState = func() {
-			snap := wld.Snapshot()
-			stateData := persist.State{
-				MapPath:  state.get(),
-				WaveTime: snap.WaveTime,
-				Wave:     snap.Wave,
-				Tick:     snap.Tick,
-				TimeData: snap.TimeData,
-				Rand0:    snap.Rand0,
-				Rand1:    snap.Rand1,
-			}
-			stateBytes, _ := json.Marshal(stateData)
-			savedState := false
-			if serverCore != nil {
-				ch := make(chan coreio.PersistenceResult, 1)
-				if !serverCore.SendToCore2(&coreio.PersistenceMessage{
-					Action:     "save_state",
-					Path:       state.get(),
-					StateData:  stateBytes,
-					ResultChan: ch,
-				}) {
-					fmt.Println("persist save_state skipped: core2 queue unavailable, using direct save")
-				} else {
-					select {
-					case res := <-ch:
-						if res.Error != nil {
-							fmt.Printf("persist save_state failed: %v\n", res.Error)
-						} else {
-							savedState = true
-						}
-					case <-time.After(2 * time.Second):
-						fmt.Println("persist save_state timeout: using direct save")
-					}
-				}
-			}
-			if !savedState {
-				_ = persist.Save(cfg.Persist, stateData)
-			}
-			_ = persist.SaveMSAVSnapshotFromModel(cfg.Persist, snap, wld.CloneModel(), state.get())
+			hotSnapshots.Update(captureRuntimeSnapshot("hot"))
 		}
-		interval := time.Duration(cfg.Persist.IntervalSec) * time.Second
-		if interval <= 0 {
-			interval = 30 * time.Second
+		flushColdSnapshot = func() {
+			stateData := hotSnapshots.Update(captureRuntimeSnapshot("hot"))
+			stateData.Kind = "cold"
+			if err := persist.Save(cfg.Persist, stateData); err != nil {
+				fmt.Printf("[snapshot] cold save failed: %v\n", err)
+			}
+		}
+		saveState()
+		hotInterval := time.Duration(cfg.Persist.HotIntervalSec) * time.Second
+		if hotInterval <= 0 {
+			hotInterval = time.Second
 		}
 		go func() {
-			t := time.NewTicker(interval)
+			t := time.NewTicker(hotInterval)
 			defer t.Stop()
 			for range t.C {
 				saveState()
+			}
+		}()
+		coldInterval := time.Duration(cfg.Persist.IntervalSec) * time.Second
+		if coldInterval <= 0 {
+			coldInterval = 30 * time.Second
+		}
+		go func() {
+			t := time.NewTicker(coldInterval)
+			defer t.Stop()
+			for range t.C {
+				flushColdSnapshot()
 			}
 		}()
 	}
@@ -4616,8 +4628,8 @@ func printHelpCategory(cfg config.Config, category string) {
 		printHelpCmd("scheduler status|on|off", "调度器配置")
 		fmt.Printf("  scheduler 状态:           %s\n", colorState(cfg.Runtime.SchedulerEnabled))
 	case "persist":
-		fmt.Printf("  persist: enabled=%v dir=%s file=%s interval=%ds\n", cfg.Persist.Enabled, canonicalRuntimePath(cfg.Persist.Directory), cfg.Persist.File, cfg.Persist.IntervalSec)
-		fmt.Printf("  msav: enabled=%v dir=%s file=%s\n", cfg.Persist.SaveMSAV, canonicalRuntimePath(cfg.Persist.MSAVDir), cfg.Persist.MSAVFile)
+		fmt.Printf("  snapshot: enabled=%v cold_dir=%s file=%s cold_interval=%ds hot_interval=%ds retention=%dd\n",
+			cfg.Persist.Enabled, canonicalRuntimePath(cfg.Persist.Directory), cfg.Persist.File, cfg.Persist.IntervalSec, cfg.Persist.HotIntervalSec, cfg.Persist.RetentionDays)
 		fmt.Printf("  script file: %s\n", canonicalRuntimePath(cfg.Script.File))
 		fmt.Printf("  ops file: %s\n", canonicalRuntimePath(cfg.Admin.OpsFile))
 	case "net":
@@ -5526,27 +5538,75 @@ func broadcastDropItem(srv *netserver.Server, playerID int32, angle float32) {
 	})
 }
 
+const maxBlockSnapshotPayloadBytes = 800
+
+func encodeBlockSnapshotEntry(snap world.BlockSyncSnapshot) ([]byte, bool) {
+	if snap.BlockID <= 0 || len(snap.Data) == 0 {
+		return nil, false
+	}
+	writer := protocol.NewWriter()
+	_ = writer.WriteInt32(snap.Pos)
+	_ = writer.WriteInt16(snap.BlockID)
+	_ = writer.WriteBytes(snap.Data)
+	return append([]byte(nil), writer.Bytes()...), true
+}
+
+func buildIsolatedBlockSnapshotPackets(snaps []world.BlockSyncSnapshot) []*protocol.Remote_NetClient_blockSnapshot_34 {
+	if len(snaps) == 0 {
+		return nil
+	}
+	packets := make([]*protocol.Remote_NetClient_blockSnapshot_34, 0, len(snaps))
+	for _, snap := range snaps {
+		entry, ok := encodeBlockSnapshotEntry(snap)
+		if !ok {
+			continue
+		}
+		packets = append(packets, &protocol.Remote_NetClient_blockSnapshot_34{
+			Amount: 1,
+			Data:   entry,
+		})
+	}
+	return packets
+}
+
 func buildBlockSnapshotPackets(snaps []world.BlockSyncSnapshot) []*protocol.Remote_NetClient_blockSnapshot_34 {
 	if len(snaps) == 0 {
 		return nil
 	}
-	// The official client aborts the rest of a blockSnapshot packet as soon as it
-	// hits one mismatched or missing building. Keep each snapshot isolated so one
-	// bad tile cannot poison unrelated turret/container updates in the same batch.
-	packets := make([]*protocol.Remote_NetClient_blockSnapshot_34, 0, len(snaps))
-	for _, snap := range snaps {
-		if snap.BlockID <= 0 || len(snap.Data) == 0 {
-			continue
+	packets := make([]*protocol.Remote_NetClient_blockSnapshot_34, 0, (len(snaps)/12)+1)
+	writer := protocol.NewWriter()
+	amount := int16(0)
+	flush := func() {
+		if amount <= 0 {
+			return
 		}
-		writer := protocol.NewWriter()
-		_ = writer.WriteInt32(snap.Pos)
-		_ = writer.WriteInt16(snap.BlockID)
-		_ = writer.WriteBytes(snap.Data)
 		packets = append(packets, &protocol.Remote_NetClient_blockSnapshot_34{
-			Amount: 1,
+			Amount: amount,
 			Data:   append([]byte(nil), writer.Bytes()...),
 		})
+		writer = protocol.NewWriter()
+		amount = 0
 	}
+	for _, snap := range snaps {
+		entry, ok := encodeBlockSnapshotEntry(snap)
+		if !ok {
+			continue
+		}
+		if len(entry) > maxBlockSnapshotPayloadBytes {
+			flush()
+			packets = append(packets, &protocol.Remote_NetClient_blockSnapshot_34{
+				Amount: 1,
+				Data:   entry,
+			})
+			continue
+		}
+		if amount > 0 && len(writer.Bytes())+len(entry) > maxBlockSnapshotPayloadBytes {
+			flush()
+		}
+		_ = writer.WriteBytes(entry)
+		amount++
+	}
+	flush()
 	return packets
 }
 
@@ -5593,6 +5653,18 @@ func sendFilteredBlockSnapshotsToConn(conn *netserver.Conn, wld *world.World, sn
 		snaps = filterBlockSnapshotsForViewerTeam(wld, snaps, conn.TeamID())
 	}
 	for _, packet := range buildBlockSnapshotPackets(snaps) {
+		_ = conn.SendAsync(packet)
+	}
+}
+
+func sendIsolatedFilteredBlockSnapshotsToConn(conn *netserver.Conn, wld *world.World, snaps []world.BlockSyncSnapshot) {
+	if conn == nil || wld == nil || len(snaps) == 0 {
+		return
+	}
+	if currentWorldPathLooksHidden(currentRuntimeWorldPath()) {
+		snaps = filterBlockSnapshotsForViewerTeam(wld, snaps, conn.TeamID())
+	}
+	for _, packet := range buildIsolatedBlockSnapshotPackets(snaps) {
 		_ = conn.SendAsync(packet)
 	}
 }
@@ -5751,7 +5823,8 @@ func sendRequestedBlockSnapshotToConn(conn *netserver.Conn, wld *world.World, po
 	// Match vanilla NetServer.requestBlockSnapshot(): only send writeSync bytes for
 	// the requested building. Re-sending construct/setTile here races blockSnapshot
 	// against fresh build creation and can wipe client-side inventory/ammo views.
-	sendBlockSnapshotsForPackedToConn(conn, wld, []int32{pos})
+	sendIsolatedFilteredBlockSnapshotsToConn(conn, wld, wld.BlockSyncSnapshotsForPackedLiveOnly([]int32{pos}))
+	sendIsolatedFilteredBlockSnapshotsToConn(conn, wld, wld.ItemTurretBlockSyncSnapshotsForPackedLiveOnly([]int32{pos}))
 }
 
 func authoritativeTileStatePacketsForPacked(wld *world.World, pos int32) []any {
@@ -5886,7 +5959,8 @@ func broadcastBlockSnapshots(srv *netserver.Server, wld *world.World) {
 	// The world stream already delivered msav inline sync bytes on load/connect.
 	// Periodic overlays must be generated from current runtime state only, or they
 	// can replay stale map bytes back onto active clients.
-	broadcastFilteredBlockSnapshots(srv, wld, wld.PeriodicBlockSyncSnapshotsLiveOnly(), true)
+	broadcastFilteredBlockSnapshots(srv, wld, wld.BlockSyncSnapshotsLiveOnly(), true)
+	broadcastFilteredBlockSnapshots(srv, wld, wld.ItemTurretBlockSyncSnapshotsLiveOnly(), true)
 }
 
 func broadcastBlockSnapshotsForPacked(srv *netserver.Server, wld *world.World, packedPositions []int32) {
@@ -6715,7 +6789,7 @@ func printServerProgress(cfg config.Config, apiEnabled bool, scriptCtl *scriptCo
 	}{
 		{"网络协议握手/连接管理", true},
 		{"地图与 MSAV 读写/快照", true},
-		{"OP 权限与持久化", true},
+		{"OP 权限与运行快照", true},
 		{"召唤指令与写回", true},
 		{"API 多 Key 与管理命令", len(cfg.API.Keys) >= 0},
 		{"API 管理接口(/help,/ops,/summon,/stop)", apiEnabled},
@@ -7087,8 +7161,8 @@ func printSelfCheck(listenAddr string, build int, worldPath string, cfg config.C
 	fmt.Printf("  API: enabled=%v bind=%s auth=%v keys=%d\n", cfg.API.Enabled, cfg.API.Bind, len(cfg.API.Keys) > 0, len(cfg.API.Keys))
 	fmt.Printf("  Storage: mode=%s db=%v dir=%s\n", cfg.Storage.Mode, cfg.Storage.DatabaseEnabled, canonicalRuntimePath(cfg.Storage.Directory))
 	fmt.Printf("  Mods: enabled=%v dir=%s\n", cfg.Mods.Enabled, cfg.Mods.Directory)
-	fmt.Printf("  Persist: enabled=%v dir=%s file=%s interval=%ds\n", cfg.Persist.Enabled, canonicalRuntimePath(cfg.Persist.Directory), cfg.Persist.File, cfg.Persist.IntervalSec)
-	fmt.Printf("  MSAV snapshot: enabled=%v dir=%s file=%s\n", cfg.Persist.SaveMSAV, canonicalRuntimePath(cfg.Persist.MSAVDir), cfg.Persist.MSAVFile)
+	fmt.Printf("  Snapshot: enabled=%v cold_dir=%s file=%s cold_interval=%ds hot_interval=%ds retention=%dd\n",
+		cfg.Persist.Enabled, canonicalRuntimePath(cfg.Persist.Directory), cfg.Persist.File, cfg.Persist.IntervalSec, cfg.Persist.HotIntervalSec, cfg.Persist.RetentionDays)
 	host, port, err := net.SplitHostPort(listenAddr)
 	if err != nil {
 		fmt.Printf("  端口解析失败: %v\n", err)

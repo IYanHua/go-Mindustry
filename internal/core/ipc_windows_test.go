@@ -95,7 +95,7 @@ func TestRemoteCore2PersistenceRoundTrip(t *testing.T) {
 	persistCfg := config.PersistConfig{
 		Enabled:   true,
 		Directory: filepath.Join(t.TempDir(), "state"),
-		File:      "server-state.json",
+		File:      "latest.json",
 	}
 
 	endpoint := normalizeIPCEndpoint(fmt.Sprintf("mdt-server-test-core2-%d", time.Now().UnixNano()))

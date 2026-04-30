@@ -562,7 +562,7 @@ func TestCore2SaveStateUsesProvider(t *testing.T) {
 	sc := NewServerCore(time.Second, Config{Name: "test", MessageBuf: 4, WorkerCount: 1}, config.PersistConfig{
 		Enabled:   true,
 		Directory: dir,
-		File:      "server-state.json",
+		File:      "latest.json",
 	})
 	sc.SetPersistStateProvider(func() persist.State {
 		return persist.State{

@@ -39,6 +39,8 @@ const (
 	autonomousAIEntityRescanSec   = float32(0.20)
 	autonomousAIDefenderRescanSec = float32(0.25)
 	autonomousAINoTargetRescanSec = float32(0.25)
+
+	groundPathMaxExpanded = 768
 )
 
 type unitAIState struct {
@@ -1495,6 +1497,9 @@ func (w *World) findGroundWaypointLocked(fromX, fromY, toX, toY, goalRadius floa
 	})
 
 	found := int32(-1)
+	best := start
+	bestH := groundPathHeuristic(startX, startY, goalX, goalY, goalRadiusTiles)
+	expanded := 0
 	dirs := [4][2]int{{1, 0}, {-1, 0}, {0, 1}, {0, -1}}
 	for len(heap) > 0 {
 		var cur groundPathNode
@@ -1506,9 +1511,18 @@ func (w *World) findGroundWaypointLocked(fromX, fromY, toX, toY, goalRadius floa
 		pos := cur.pos
 		cx := int(pos % int32(w.model.Width))
 		cy := int(pos / int32(w.model.Width))
+		expanded++
 		wx, wy := tileCenterWorld(cx, cy)
+		h := groundPathHeuristic(cx, cy, goalX, goalY, goalRadiusTiles)
+		if (pos == start || !w.groundCellBlockedLocked(cx, cy)) && h < bestH {
+			best = pos
+			bestH = h
+		}
 		if (pos == start || !w.groundCellBlockedLocked(cx, cy)) && reachedTarget(wx, wy, toX, toY, goalRadius) {
 			found = pos
+			break
+		}
+		if expanded >= groundPathMaxExpanded {
 			break
 		}
 		for _, dir := range dirs {
@@ -1537,7 +1551,10 @@ func (w *World) findGroundWaypointLocked(fromX, fromY, toX, toY, goalRadius floa
 	}
 	w.groundPathHeap = heap[:0]
 	if found < 0 {
-		return 0, 0, false
+		if best == start {
+			return toX, toY, true
+		}
+		found = best
 	}
 
 	step := found

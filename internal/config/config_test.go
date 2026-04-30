@@ -35,11 +35,11 @@ directory = "mods"
 
 [persist]
 enabled = true
-directory = "data/state"
-file = "server-state.json"
+directory = "data/snapshots/runtime"
+file = "latest.json"
+hot_interval_sec = 2
 interval_sec = 15
-save_msav = true
-msav_dir = "data/snapshots"
+retention_days = 7
 
 [script]
 file = "data/state/scripts.json"
@@ -94,8 +94,8 @@ free_os_memory = false
 	if !cfg.Persist.Enabled || cfg.Persist.IntervalSec != 15 {
 		t.Fatalf("persist config not loaded: %+v", cfg.Persist)
 	}
-	if !cfg.Persist.SaveMSAV || cfg.Persist.MSAVDir != "data/snapshots" {
-		t.Fatalf("persist msav config not loaded: %+v", cfg.Persist)
+	if cfg.Persist.Directory != "data/snapshots/runtime" || cfg.Persist.File != "latest.json" || cfg.Persist.HotIntervalSec != 2 || cfg.Persist.RetentionDays != 7 || cfg.Persist.SaveMSAV {
+		t.Fatalf("snapshot config not loaded: %+v", cfg.Persist)
 	}
 	if cfg.Script.File != "data/state/scripts.json" || cfg.Script.DailyGCTime != "04:30" {
 		t.Fatalf("script config not loaded: %+v", cfg.Script)

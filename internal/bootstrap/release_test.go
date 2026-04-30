@@ -129,7 +129,6 @@ func TestEnsureWorkspaceCreatesStateFilesButNoSampleMods(t *testing.T) {
 	for _, path := range []string{
 		filepath.Join(root, "data", "events", "all.jsonl"),
 		filepath.Join(root, "data", "state", "scripts.json"),
-		filepath.Join(root, "data", "state", "server-state.json"),
 		filepath.Join(root, "configs", "json", "ops.json"),
 		filepath.Join(root, "configs", "json", "block_names.json"),
 		filepath.Join(root, "data", "vanilla", "profiles.json"),
@@ -138,5 +137,8 @@ func TestEnsureWorkspaceCreatesStateFilesButNoSampleMods(t *testing.T) {
 		if _, err := os.Stat(path); err != nil {
 			t.Fatalf("expected bootstrap output %s: %v", path, err)
 		}
+	}
+	if st, err := os.Stat(filepath.Join(root, "data", "snapshots", "runtime")); err != nil || !st.IsDir() {
+		t.Fatalf("expected cold snapshot directory: %v", err)
 	}
 }

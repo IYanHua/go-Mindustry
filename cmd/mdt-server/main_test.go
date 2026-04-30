@@ -39,6 +39,19 @@ func TestValidateBuildVersionOnlyAllows157(t *testing.T) {
 	}
 }
 
+func TestNormalizeSnapshotWaveTimeSeconds(t *testing.T) {
+	w := world.New(world.Config{TPS: 60})
+	if got := normalizeSnapshotWaveTimeSeconds(w, 5400); got != 90 {
+		t.Fatalf("expected old tick-scaled wavetime to convert to 90s, got %v", got)
+	}
+	if got := normalizeSnapshotWaveTimeSeconds(w, 580); got != 120 {
+		t.Fatalf("expected stale oversized seconds to clamp to spacing, got %v", got)
+	}
+	if got := normalizeSnapshotWaveTimeSeconds(w, 45); got != 45 {
+		t.Fatalf("expected valid seconds to pass through, got %v", got)
+	}
+}
+
 func TestBindStatusResolverReturnsFalseWithoutIdentityStore(t *testing.T) {
 	resolver := newBindStatusResolver("internal", "", 0, 0, nil)
 	if resolver == nil {
@@ -1721,8 +1734,27 @@ func TestSendRequestedBlockSnapshotToConnEmitsOnlyBlockSnapshotPayload(t *testin
 	}
 }
 
-func TestBuildBlockSnapshotPacketsIsolatesSnapshots(t *testing.T) {
+func TestBuildBlockSnapshotPacketsBatchesSnapshots(t *testing.T) {
 	packets := buildBlockSnapshotPackets([]world.BlockSyncSnapshot{
+		{Pos: protocol.PackPoint2(2, 3), BlockID: 500, Data: []byte{1, 2, 3}},
+		{Pos: protocol.PackPoint2(4, 5), BlockID: 910, Data: []byte{4, 5, 6}},
+	})
+	if len(packets) != 1 {
+		t.Fatalf("expected one batched blockSnapshot packet, got %d", len(packets))
+	}
+	if packets[0] == nil {
+		t.Fatal("expected packet to be non-nil")
+	}
+	if packets[0].Amount != 2 {
+		t.Fatalf("expected packet amount 2, got %d", packets[0].Amount)
+	}
+	if len(packets[0].Data) > maxBlockSnapshotPayloadBytes {
+		t.Fatalf("expected packet payload <= %d bytes, got %d", maxBlockSnapshotPayloadBytes, len(packets[0].Data))
+	}
+}
+
+func TestBuildIsolatedBlockSnapshotPacketsKeepsRequestsSeparate(t *testing.T) {
+	packets := buildIsolatedBlockSnapshotPackets([]world.BlockSyncSnapshot{
 		{Pos: protocol.PackPoint2(2, 3), BlockID: 500, Data: []byte{1, 2, 3}},
 		{Pos: protocol.PackPoint2(4, 5), BlockID: 910, Data: []byte{4, 5, 6}},
 	})

@@ -185,7 +185,7 @@ func TestHandleOfficialUnitClearRespawnsAliveCoreUnit(t *testing.T) {
 	conn.unitID = 777
 	conn.teamID = 1
 	conn.dead = false
-	conn.lastSpawnAt = time.Now()
+	conn.lastSpawnAt = time.Now().Add(-1 * time.Second)
 
 	var spawnedUnitID int32
 	srv.SpawnUnitFn = func(_ *Conn, unitID int32, pos protocol.Point2, unitType int16) (float32, float32, bool) {
@@ -542,9 +542,13 @@ func TestHandleOfficialUnitClearIgnoredDuringInitialWorldReloadGrace(t *testing.
 	}
 }
 
-func TestHandleOfficialUnitClearKeepsAuthoritativeAliveUnit(t *testing.T) {
+func TestHandleOfficialUnitClearRespawnsAuthoritativeAliveUnit(t *testing.T) {
 	srv := NewServer("127.0.0.1:0", 157)
 	srv.Content.RegisterUnitType(testUnitType{id: 36, name: "beta"})
+	srv.PlayerUnitTypeFn = func() int16 { return 36 }
+	srv.SpawnTileFn = func() (protocol.Point2, bool) {
+		return protocol.Point2{X: 4, Y: 6}, true
+	}
 
 	serverSide, clientSide := net.Pipe()
 	defer clientSide.Close()
@@ -558,8 +562,23 @@ func TestHandleOfficialUnitClearKeepsAuthoritativeAliveUnit(t *testing.T) {
 	conn.snapX = 64
 	conn.snapY = 96
 
+	var spawnedUnitID int32
+	srv.SpawnUnitFn = func(_ *Conn, unitID int32, pos protocol.Point2, unitType int16) (float32, float32, bool) {
+		if pos.X != 4 || pos.Y != 6 {
+			t.Fatalf("unexpected spawn tile %+v", pos)
+		}
+		if unitType != 36 {
+			t.Fatalf("expected respawn unit type 36, got %d", unitType)
+		}
+		spawnedUnitID = unitID
+		return 80, 120, true
+	}
+	var droppedUnitID int32
+	srv.DropUnitFn = func(unitID int32) {
+		droppedUnitID = unitID
+	}
 	srv.UnitInfoFn = func(unitID int32) (UnitInfo, bool) {
-		if unitID != conn.unitID {
+		if unitID != 1820 && unitID != spawnedUnitID {
 			return UnitInfo{}, false
 		}
 		return UnitInfo{
@@ -573,12 +592,9 @@ func TestHandleOfficialUnitClearKeepsAuthoritativeAliveUnit(t *testing.T) {
 		}, true
 	}
 
-	var setPositionPackets int
 	var spawnPackets int
 	conn.onSend = func(obj any, _ int, _ int, _ int) {
 		switch obj.(type) {
-		case *protocol.Remote_NetClient_setPosition_29:
-			setPositionPackets++
 		case *protocol.Remote_CoreBlock_playerSpawn_149:
 			spawnPackets++
 		}
@@ -592,40 +608,33 @@ func TestHandleOfficialUnitClearKeepsAuthoritativeAliveUnit(t *testing.T) {
 
 	srv.handleOfficialUnitClear(conn)
 
-	deadline := time.Now().Add(200 * time.Millisecond)
-	for time.Now().Before(deadline) {
-		if setPositionPackets > 0 {
-			break
-		}
-		time.Sleep(10 * time.Millisecond)
-	}
-
 	if conn.dead {
-		t.Fatal("expected authoritative alive unitClear to keep player alive")
+		t.Fatal("expected authoritative alive unitClear to finish with an alive player")
 	}
-	if conn.unitID != 1820 {
-		t.Fatalf("expected authoritative alive unit to remain bound, got %d", conn.unitID)
+	if conn.unitID == 1820 || conn.unitID != spawnedUnitID {
+		t.Fatalf("expected authoritative alive unitClear to replace old unit with %d, got %d", spawnedUnitID, conn.unitID)
 	}
-	if spawnPackets != 0 {
-		t.Fatalf("expected no respawn packets for authoritative alive unitClear, got %d", spawnPackets)
+	if droppedUnitID != 1820 {
+		t.Fatalf("expected old authoritative unit to be dropped, got %d", droppedUnitID)
 	}
-	if setPositionPackets == 0 {
-		t.Fatal("expected alive unitClear ignore to resend authoritative position")
+	if spawnPackets != 1 {
+		t.Fatalf("expected one respawn packet for authoritative alive unitClear, got %d", spawnPackets)
 	}
-	if conn.lastSpawnRepairAt.IsZero() {
-		t.Fatal("expected alive unitClear ignore to record a repair sync")
-	}
-	if !conn.lastRespawnReq.IsZero() {
-		t.Fatal("expected alive unitClear ignore not to queue a respawn")
+	if conn.lastRespawnReq.IsZero() {
+		t.Fatal("expected authoritative alive unitClear to record respawn request")
 	}
 
 	_ = conn.Close()
 	<-done
 }
 
-func TestHandleOfficialUnitClearAliveRepairCanRepeatAfterPreviousRepair(t *testing.T) {
+func TestHandleOfficialUnitClearRespawnCanRepeatAfterPreviousRepair(t *testing.T) {
 	srv := NewServer("127.0.0.1:0", 157)
 	srv.Content.RegisterUnitType(testUnitType{id: 36, name: "beta"})
+	srv.PlayerUnitTypeFn = func() int16 { return 36 }
+	srv.SpawnTileFn = func() (protocol.Point2, bool) {
+		return protocol.Point2{X: 5, Y: 8}, true
+	}
 
 	serverSide, clientSide := net.Pipe()
 	defer clientSide.Close()
@@ -641,8 +650,19 @@ func TestHandleOfficialUnitClearAliveRepairCanRepeatAfterPreviousRepair(t *testi
 	conn.snapX = 96
 	conn.snapY = 128
 
+	var spawnedUnitID int32
+	srv.SpawnUnitFn = func(_ *Conn, unitID int32, pos protocol.Point2, unitType int16) (float32, float32, bool) {
+		if pos.X != 5 || pos.Y != 8 {
+			t.Fatalf("unexpected spawn tile %+v", pos)
+		}
+		if unitType != 36 {
+			t.Fatalf("expected respawn unit type 36, got %d", unitType)
+		}
+		spawnedUnitID = unitID
+		return 112, 144, true
+	}
 	srv.UnitInfoFn = func(unitID int32) (UnitInfo, bool) {
-		if unitID != conn.unitID {
+		if unitID != 1830 && unitID != spawnedUnitID {
 			return UnitInfo{}, false
 		}
 		return UnitInfo{
@@ -656,11 +676,11 @@ func TestHandleOfficialUnitClearAliveRepairCanRepeatAfterPreviousRepair(t *testi
 		}, true
 	}
 
-	var setPositionPackets int
+	var spawnPackets int
 	conn.onSend = func(obj any, _ int, _ int, _ int) {
 		switch obj.(type) {
-		case *protocol.Remote_NetClient_setPosition_29:
-			setPositionPackets++
+		case *protocol.Remote_CoreBlock_playerSpawn_149:
+			spawnPackets++
 		}
 	}
 
@@ -672,19 +692,17 @@ func TestHandleOfficialUnitClearAliveRepairCanRepeatAfterPreviousRepair(t *testi
 
 	srv.handleOfficialUnitClear(conn)
 
-	deadline := time.Now().Add(200 * time.Millisecond)
-	for time.Now().Before(deadline) {
-		if setPositionPackets > 0 {
-			break
-		}
-		time.Sleep(10 * time.Millisecond)
+	if conn.dead {
+		t.Fatal("expected official unitClear to respawn after previous repair")
 	}
-
-	if setPositionPackets == 0 {
-		t.Fatal("expected authoritative alive unitClear to resend a repair even after an earlier spawn repair")
+	if conn.unitID != spawnedUnitID || conn.unitID == 1830 {
+		t.Fatalf("expected replacement unit %d after previous repair, got %d", spawnedUnitID, conn.unitID)
 	}
-	if !conn.lastSpawnRepairAt.After(prevRepair) {
-		t.Fatalf("expected repeated alive repair to refresh repair timestamp, prev=%v got=%v", prevRepair, conn.lastSpawnRepairAt)
+	if spawnPackets != 1 {
+		t.Fatalf("expected one respawn packet after previous repair, got %d", spawnPackets)
+	}
+	if conn.lastSpawnAt.IsZero() || !conn.lastSpawnAt.After(prevRepair) {
+		t.Fatalf("expected respawn to refresh spawn timestamp, prev=%v got=%v", prevRepair, conn.lastSpawnAt)
 	}
 
 	_ = conn.Close()

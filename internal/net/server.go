@@ -89,18 +89,18 @@ type entitySnapshotBaseEntry struct {
 }
 
 type entitySnapshotPlayerBase struct {
-	unit                 protocol.UnitSyncEntity
-	unitEncoded          []byte
-	playerWithUnit       *protocol.PlayerEntity
-	playerWithUnitData   []byte
-	playerWithoutUnit    *protocol.PlayerEntity
+	unit                  protocol.UnitSyncEntity
+	unitEncoded           []byte
+	playerWithUnit        *protocol.PlayerEntity
+	playerWithUnitData    []byte
+	playerWithoutUnit     *protocol.PlayerEntity
 	playerWithoutUnitData []byte
 }
 
 type entitySnapshotBase struct {
-	builtAt      time.Time
-	players      []entitySnapshotPlayerBase
-	extraEntries []entitySnapshotBaseEntry
+	builtAt       time.Time
+	players       []entitySnapshotPlayerBase
+	extraEntries  []entitySnapshotBaseEntry
 	legacyPackets []*protocol.Remote_NetClient_entitySnapshot_32
 }
 
@@ -2758,6 +2758,7 @@ type Conn struct {
 	id                    int32
 	playerID              int32
 	udpMu                 sync.RWMutex
+	udpSendMu             sync.Mutex
 	udpAddr               *net.UDPAddr
 	hasBegunConnecting    bool
 	hasConnected          bool
@@ -4123,6 +4124,8 @@ func (s *Server) sendUnreliable(c *Conn, obj any) error {
 	}
 	if s.udpConn != nil {
 		if addr := c.UDPAddr(); addr != nil {
+			c.udpSendMu.Lock()
+			defer c.udpSendMu.Unlock()
 			payload, packetID, frameworkID, err := c.Encode(obj)
 			if err != nil {
 				c.udpErrors.Add(1)
@@ -4701,6 +4704,45 @@ func (s *Server) spawnRespawnUnit(c *Conn) bool {
 	return true
 }
 
+func (s *Server) clearConnUnitForRespawn(c *Conn, source string) {
+	if s == nil || c == nil || c.playerID == 0 {
+		return
+	}
+	s.clearConnControlledBuild(c)
+	oldUnitID := c.unitID
+	if oldUnitID == 0 {
+		return
+	}
+	if unit, ok := s.playerControlledUnitState(c, oldUnitID); ok && unit != nil && !unit.SpawnedByCore {
+		s.releaseConnUnitControl(c, oldUnitID)
+		fmt.Printf("[net] unitClear released controlled unit conn=%d player=%d unit=%d source=%s\n",
+			c.id, c.playerID, oldUnitID, source)
+		return
+	}
+	if !s.dropPlayerUnitEntity(c, oldUnitID) && s.DropUnitFn != nil {
+		s.DropUnitFn(oldUnitID)
+	}
+	if c.unitID == oldUnitID {
+		c.unitID = 0
+	}
+}
+
+func (s *Server) markDeadAfterUnitClear(c *Conn, source string) {
+	if c == nil || c.playerID == 0 {
+		return
+	}
+	c.dead = true
+	c.deathTimer = 0
+	c.lastRespawnCheck = time.Now()
+	c.lastSpawnAt = time.Time{}
+	c.lastSpawnRepairAt = time.Time{}
+	c.lastDeadIgnoreAt = time.Time{}
+	c.clientDeadIgnores = 0
+	c.miningTilePos = invalidTilePos
+	fmt.Printf("[net] player unit cleared conn=%d player=%d team=%d source=%s snap=(%.1f,%.1f)\n",
+		c.id, c.playerID, c.TeamID(), source, c.snapX, c.snapY)
+}
+
 func (s *Server) finishRespawn(c *Conn) {
 	if c == nil {
 		return
@@ -4727,21 +4769,27 @@ func (s *Server) handleOfficialUnitClear(c *Conn) {
 	if !c.lastRespawnReq.IsZero() && now.Sub(c.lastRespawnReq) < 250*time.Millisecond {
 		return
 	}
+	if !c.lastSpawnAt.IsZero() && now.Sub(c.lastSpawnAt) < 250*time.Millisecond {
+		return
+	}
+	if !c.beginRespawnChain("official-unitClear") {
+		return
+	}
+	defer c.endRespawnChain("official-unitClear")
 	if s.connUnitAlive(c) {
-		if !c.beginRespawnChain("official-unitClear") {
-			return
-		}
-		defer c.endRespawnChain("official-unitClear")
 		if s.tryDockedUnitClearRespawn(c, "unitClear-91") {
 			return
 		}
-		spawnedByCore := false
-		if unit, ok := s.currentPlayerUnitState(c); ok && unit != nil {
-			spawnedByCore = unit.SpawnedByCore
+		c.lastRespawnReq = now
+		s.clearConnUnitForRespawn(c, "unitClear-91")
+		s.markDeadAfterUnitClear(c, "unitClear-91")
+		if s.spawnRespawnUnit(c) {
+			s.finishRespawn(c)
+			s.sendImmediateAliveSync(c, "official-unitClear")
+			fmt.Printf("[net] respawn sent conn=%d chain=official-unitClear\n", c.id)
+		} else {
+			fmt.Printf("[net] respawn skipped conn=%d chain=official-unitClear reason=no-spawn-tile\n", c.id)
 		}
-		fmt.Printf("[net] alive unitClear ignored conn=%d player=%d unit=%d spawned_by_core=%v age=%s\n",
-			c.id, c.playerID, c.unitID, spawnedByCore, now.Sub(c.lastSpawnAt).Round(10*time.Millisecond))
-		s.repairOfficialUnitClearAliveBinding(c)
 		return
 	}
 	if s.connFreshSpawnWorldBindingMissing(c, now, 2*time.Second) {
@@ -4749,10 +4797,6 @@ func (s *Server) handleOfficialUnitClear(c *Conn) {
 			c.id, c.playerID, c.unitID, now.Sub(c.lastSpawnAt).Round(10*time.Millisecond))
 		return
 	}
-	if !c.beginRespawnChain("official-unitClear") {
-		return
-	}
-	defer c.endRespawnChain("official-unitClear")
 	c.lastRespawnReq = now
 	s.markDead(c, "unitClear-91")
 	if s.spawnRespawnUnit(c) {
@@ -6163,28 +6207,29 @@ func (s *Server) syncUnitFromWorld(u *protocol.UnitEntitySync) {
 	}
 }
 
-func (s *Server) dropPlayerUnitEntity(c *Conn, unitID int32) {
+func (s *Server) dropPlayerUnitEntity(c *Conn, unitID int32) bool {
 	if c == nil || c.playerID == 0 || unitID == 0 {
-		return
+		return false
 	}
 	s.entityMu.Lock()
 	defer s.entityMu.Unlock()
 	ent, ok := s.entities[unitID]
 	if !ok {
-		return
+		return false
 	}
 	u, ok := ent.(*protocol.UnitEntitySync)
 	if !ok {
-		return
+		return false
 	}
 	state, ok := u.Controller.(*protocol.ControllerState)
 	if !ok || state == nil || state.Type != protocol.ControllerPlayer || state.PlayerID != c.playerID {
-		return
+		return false
 	}
 	delete(s.entities, unitID)
 	if s.DropUnitFn != nil {
 		s.DropUnitFn(unitID)
 	}
+	return true
 }
 
 func (s *Server) broadcastPlayerDisconnect(playerID int32, except *Conn) {
