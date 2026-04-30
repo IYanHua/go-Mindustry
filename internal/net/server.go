@@ -83,6 +83,34 @@ type previewPlanState struct {
 	receiving     bool
 }
 
+type entitySnapshotBaseEntry struct {
+	entity  protocol.UnitSyncEntity
+	encoded []byte
+}
+
+type entitySnapshotPlayerBase struct {
+	unit                 protocol.UnitSyncEntity
+	unitEncoded          []byte
+	playerWithUnit       *protocol.PlayerEntity
+	playerWithUnitData   []byte
+	playerWithoutUnit    *protocol.PlayerEntity
+	playerWithoutUnitData []byte
+}
+
+type entitySnapshotBase struct {
+	builtAt      time.Time
+	players      []entitySnapshotPlayerBase
+	extraEntries []entitySnapshotBaseEntry
+	legacyPackets []*protocol.Remote_NetClient_entitySnapshot_32
+}
+
+type EntitySnapshotCacheStats struct {
+	Hits               uint64
+	Misses             uint64
+	LastBuildDuration  time.Duration
+	LastFilterDuration time.Duration
+}
+
 type AssemblerDroneSpawnedRequest struct {
 	Pos    int32
 	UnitID int32
@@ -114,6 +142,12 @@ type Server struct {
 	entityMu        sync.Mutex
 	entities        map[int32]protocol.UnitSyncEntity
 	unitNext        int32
+	entitySnapMu    sync.RWMutex
+	entitySnapCache entitySnapshotBase
+	entitySnapHits  atomic.Uint64
+	entitySnapMiss  atomic.Uint64
+	entitySnapBuild atomic.Int64
+	entitySnapView  atomic.Int64
 
 	previewMu    sync.Mutex
 	previewPlans map[int32]*previewPlanState
@@ -2692,6 +2726,7 @@ func (s *Server) addConn(c *Conn) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.conns[c] = struct{}{}
+	s.clearEntitySnapshotCache()
 }
 
 func (s *Server) removeConn(c *Conn) {
@@ -2713,6 +2748,7 @@ func (s *Server) removeConn(c *Conn) {
 		}
 		s.entityMu.Unlock()
 	}
+	s.clearEntitySnapshotCache()
 }
 
 type Conn struct {
@@ -4011,7 +4047,7 @@ func (s *Server) postConnectLoop(c *Conn) {
 			}
 
 			if !c.InWorldReloadGrace() {
-				packets, hiddenIDs, err := s.buildEntitySnapshotPacketsForConn(c)
+				packets, hiddenIDs, err := s.buildEntitySnapshotPacketsForConnCached(c)
 				if err != nil {
 					fmt.Printf("[net] entity snapshot build failed id=%d err=%v\n", c.id, err)
 					s.emitEvent(c, "entity_snapshot_build_failed", "*protocol.Remote_NetClient_entitySnapshot_32", err.Error())
@@ -5163,68 +5199,161 @@ func appendHiddenEntityID(hiddenIDs *[]int32, hiddenSet map[int32]struct{}, enti
 	*hiddenIDs = append(*hiddenIDs, entityID)
 }
 
-func (s *Server) buildEntitySnapshotPacketsForConn(viewer *Conn) ([]*protocol.Remote_NetClient_entitySnapshot_32, []int32, error) {
-	// TypeIO.WriteBytes uses int16 length; keep snapshot data under signed-short limit.
-	const maxEntitySnapshotData = 32000
+const maxEntitySnapshotData = 32000
 
-	s.mu.Lock()
-	players := make([]*Conn, 0, len(s.conns))
-	for c := range s.conns {
-		if c.hasConnected && c.playerID != 0 {
-			players = append(players, c)
+func (s *Server) buildEntitySnapshotPacketsForConn(viewer *Conn) ([]*protocol.Remote_NetClient_entitySnapshot_32, []int32, error) {
+	base, err := s.buildEntitySnapshotBaseFresh()
+	if err != nil {
+		return nil, nil, err
+	}
+	return s.materializeEntitySnapshotPackets(viewer, base)
+}
+
+func (s *Server) buildEntitySnapshotPacketsForConnCached(viewer *Conn) ([]*protocol.Remote_NetClient_entitySnapshot_32, []int32, error) {
+	base, err := s.getEntitySnapshotBaseCached()
+	if err != nil {
+		return nil, nil, err
+	}
+	start := time.Now()
+	packets, hiddenIDs, err := s.materializeEntitySnapshotPackets(viewer, base)
+	s.entitySnapView.Store(int64(time.Since(start)))
+	return packets, hiddenIDs, err
+}
+
+func (s *Server) clearEntitySnapshotCache() {
+	if s == nil {
+		return
+	}
+	s.entitySnapMu.Lock()
+	s.entitySnapCache = entitySnapshotBase{}
+	s.entitySnapMu.Unlock()
+}
+
+func (s *Server) EntitySnapshotCacheStats() EntitySnapshotCacheStats {
+	if s == nil {
+		return EntitySnapshotCacheStats{}
+	}
+	return EntitySnapshotCacheStats{
+		Hits:               s.entitySnapHits.Load(),
+		Misses:             s.entitySnapMiss.Load(),
+		LastBuildDuration:  time.Duration(s.entitySnapBuild.Load()),
+		LastFilterDuration: time.Duration(s.entitySnapView.Load()),
+	}
+}
+
+func (s *Server) getEntitySnapshotBaseCached() (entitySnapshotBase, error) {
+	if s == nil {
+		return entitySnapshotBase{}, nil
+	}
+	ttl := s.syncInterval()
+	if ttl <= 0 {
+		ttl = 200 * time.Millisecond
+	}
+	now := time.Now()
+
+	s.entitySnapMu.RLock()
+	cached := s.entitySnapCache
+	if !cached.builtAt.IsZero() && now.Sub(cached.builtAt) < ttl {
+		s.entitySnapMu.RUnlock()
+		s.entitySnapHits.Add(1)
+		return cached, nil
+	}
+	s.entitySnapMu.RUnlock()
+
+	s.entitySnapMu.Lock()
+	defer s.entitySnapMu.Unlock()
+	cached = s.entitySnapCache
+	if !cached.builtAt.IsZero() && now.Sub(cached.builtAt) < ttl {
+		s.entitySnapHits.Add(1)
+		return cached, nil
+	}
+	start := time.Now()
+	built, err := s.buildEntitySnapshotBaseFresh()
+	if err != nil {
+		return entitySnapshotBase{}, err
+	}
+	built.builtAt = now
+	s.entitySnapCache = built
+	s.entitySnapMiss.Add(1)
+	s.entitySnapBuild.Store(int64(time.Since(start)))
+	return built, nil
+}
+
+func (s *Server) buildEntitySnapshotBaseFresh() (entitySnapshotBase, error) {
+	players := s.connectedSnapshotPlayers()
+	base := entitySnapshotBase{
+		players:      make([]entitySnapshotPlayerBase, 0, len(players)),
+		extraEntries: make([]entitySnapshotBaseEntry, 0, 8),
+	}
+	for _, p := range players {
+		playerBase, ok, err := s.buildPlayerSnapshotBase(p)
+		if err != nil {
+			return entitySnapshotBase{}, err
+		}
+		if ok {
+			base.players = append(base.players, playerBase)
 		}
 	}
-	s.mu.Unlock()
-	sort.Slice(players, func(i, j int) bool {
-		if players[i].playerID != players[j].playerID {
-			return players[i].playerID < players[j].playerID
-		}
-		return players[i].id < players[j].id
-	})
 
-	extraEntities := []protocol.UnitSyncEntity(nil)
 	if s.ExtraEntitySnapshotEntitiesFn != nil {
-		var err error
-		extraEntities, err = s.ExtraEntitySnapshotEntitiesFn()
+		extraEntities, err := s.ExtraEntitySnapshotEntitiesFn()
 		if err != nil {
-			return nil, nil, err
+			return entitySnapshotBase{}, err
 		}
 		filtered := make([]protocol.UnitSyncEntity, 0, len(extraEntities))
 		for _, ent := range extraEntities {
-			if ent == nil {
-				continue
+			if ent != nil {
+				filtered = append(filtered, ent)
 			}
-			filtered = append(filtered, ent)
 		}
-		extraEntities = filtered
-		sort.Slice(extraEntities, func(i, j int) bool {
-			if extraEntities[i].ID() != extraEntities[j].ID() {
-				return extraEntities[i].ID() < extraEntities[j].ID()
+		sort.Slice(filtered, func(i, j int) bool {
+			if filtered[i].ID() != filtered[j].ID() {
+				return filtered[i].ID() < filtered[j].ID()
 			}
-			return extraEntities[i].ClassID() < extraEntities[j].ClassID()
+			return filtered[i].ClassID() < filtered[j].ClassID()
 		})
+		for _, ent := range filtered {
+			snapshot := ent
+			if typed, ok := ent.(*protocol.UnitEntitySync); ok {
+				unit := cloneUnitEntitySync(typed)
+				if unit == nil || !s.prepareUnitEntitySnapshot(unit) {
+					continue
+				}
+				snapshot = unit
+			}
+			entry, err := s.encodeEntitySnapshotEntry(snapshot)
+			if err != nil {
+				return entitySnapshotBase{}, err
+			}
+			base.extraEntries = append(base.extraEntries, entitySnapshotBaseEntry{
+				entity:  snapshot,
+				encoded: entry,
+			})
+		}
 	}
 
-	encodeEntity := func(entity protocol.UnitSyncEntity) ([]byte, error) {
-		if entity == nil {
-			return nil, nil
+	if s.ExtraEntitySnapshotFn != nil {
+		legacyWriter := protocol.NewWriterWithContext(s.TypeIO)
+		n, err := s.ExtraEntitySnapshotFn(legacyWriter)
+		if err != nil {
+			return entitySnapshotBase{}, err
 		}
-		ew := protocol.NewWriterWithContext(s.TypeIO)
-		if err := ew.WriteInt32(entity.ID()); err != nil {
-			return nil, err
+		if n > 0 || len(legacyWriter.Bytes()) > 0 {
+			if len(legacyWriter.Bytes()) > maxEntitySnapshotData {
+				return entitySnapshotBase{}, fmt.Errorf("legacy entity snapshot payload too large: %d", len(legacyWriter.Bytes()))
+			}
+			base.legacyPackets = append(base.legacyPackets, &protocol.Remote_NetClient_entitySnapshot_32{
+				Amount: n,
+				Data:   append([]byte(nil), legacyWriter.Bytes()...),
+			})
 		}
-		if err := ew.WriteByte(entity.ClassID()); err != nil {
-			return nil, err
-		}
-		entity.BeforeWrite()
-		if err := entity.WriteSync(ew); err != nil {
-			return nil, err
-		}
-		return ew.Bytes(), nil
 	}
+	return base, nil
+}
 
+func (s *Server) materializeEntitySnapshotPackets(viewer *Conn, base entitySnapshotBase) ([]*protocol.Remote_NetClient_entitySnapshot_32, []int32, error) {
 	writer := protocol.NewWriterWithContext(s.TypeIO)
-	packets := make([]*protocol.Remote_NetClient_entitySnapshot_32, 0, 4)
+	packets := make([]*protocol.Remote_NetClient_entitySnapshot_32, 0, 4+len(base.legacyPackets))
 	hiddenIDs := make([]int32, 0, 8)
 	hiddenSet := map[int32]struct{}{}
 	var sent int16
@@ -5256,103 +5385,130 @@ func (s *Server) buildEntitySnapshotPacketsForConn(viewer *Conn) ([]*protocol.Re
 		return nil
 	}
 
-	for _, p := range players {
-		unit := s.snapshotPlayerUnitEntity(p)
-		if unit != nil && !s.prepareUnitEntitySnapshot(unit) {
-			fmt.Printf("[net] skipped unit snapshot conn=%d player=%d unit=%d invalid_type=%d\n",
-				p.id, p.playerID, unit.ID(), unit.TypeID)
-			unit = nil
-		}
-		ent := &protocol.PlayerEntity{IDValue: p.playerID}
-		s.updatePlayerEntity(ent, p)
-		if unit != nil && s.entitySnapshotHidden(viewer, unit) {
-			appendHiddenEntityID(&hiddenIDs, hiddenSet, unit.ID())
-			unit = nil
-		}
-		if unit != nil {
-			ent.Unit = protocol.UnitBox{IDValue: unit.ID()}
-		} else {
-			ent.Unit = nil
-		}
-		playerHidden := s.entitySnapshotHidden(viewer, ent)
-		if playerHidden {
-			appendHiddenEntityID(&hiddenIDs, hiddenSet, ent.ID())
-		}
-		if unit != nil {
-			unitEntry, err := encodeEntity(unit)
-			if err != nil {
-				return nil, nil, err
-			}
-			if err := appendEntry(unitEntry); err != nil {
+	for _, player := range base.players {
+		unitHidden := false
+		if player.unit != nil {
+			if s.entitySnapshotHidden(viewer, player.unit) {
+				appendHiddenEntityID(&hiddenIDs, hiddenSet, player.unit.ID())
+				unitHidden = true
+			} else if err := appendEntry(player.unitEncoded); err != nil {
 				return nil, nil, err
 			}
 		}
-		if !playerHidden {
-			playerEntry, err := encodeEntity(ent)
-			if err != nil {
-				return nil, nil, err
-			}
-			if err := appendEntry(playerEntry); err != nil {
-				return nil, nil, err
-			}
-		}
-	}
 
-	for _, ent := range extraEntities {
-		switch typed := ent.(type) {
-		case *protocol.UnitEntitySync:
-			unit := cloneUnitEntitySync(typed)
-			if unit == nil || !s.prepareUnitEntitySnapshot(unit) {
-				continue
-			}
-			if s.entitySnapshotHidden(viewer, unit) {
-				appendHiddenEntityID(&hiddenIDs, hiddenSet, unit.ID())
-				continue
-			}
-			entry, err := encodeEntity(unit)
-			if err != nil {
-				return nil, nil, err
-			}
-			if err := appendEntry(entry); err != nil {
-				return nil, nil, err
-			}
-		default:
-			if s.entitySnapshotHidden(viewer, ent) {
-				appendHiddenEntityID(&hiddenIDs, hiddenSet, ent.ID())
-				continue
-			}
-			entry, err := encodeEntity(ent)
-			if err != nil {
-				return nil, nil, err
-			}
-			if err := appendEntry(entry); err != nil {
-				return nil, nil, err
-			}
+		playerEntity := player.playerWithoutUnit
+		playerData := player.playerWithoutUnitData
+		if !unitHidden && player.unit != nil {
+			playerEntity = player.playerWithUnit
+			playerData = player.playerWithUnitData
 		}
-	}
-
-	if s.ExtraEntitySnapshotFn != nil {
-		if sent > 0 {
-			flush()
+		if playerEntity != nil && s.entitySnapshotHidden(viewer, playerEntity) {
+			appendHiddenEntityID(&hiddenIDs, hiddenSet, playerEntity.ID())
+			continue
 		}
-		legacyWriter := protocol.NewWriterWithContext(s.TypeIO)
-		n, err := s.ExtraEntitySnapshotFn(legacyWriter)
-		if err != nil {
+		if err := appendEntry(playerData); err != nil {
 			return nil, nil, err
 		}
-		if n > 0 || len(legacyWriter.Bytes()) > 0 {
-			if len(legacyWriter.Bytes()) > maxEntitySnapshotData {
-				return nil, nil, fmt.Errorf("legacy entity snapshot payload too large: %d", len(legacyWriter.Bytes()))
-			}
-			packets = append(packets, &protocol.Remote_NetClient_entitySnapshot_32{
-				Amount: n,
-				Data:   append([]byte(nil), legacyWriter.Bytes()...),
-			})
+	}
+
+	for _, entry := range base.extraEntries {
+		if s.entitySnapshotHidden(viewer, entry.entity) {
+			appendHiddenEntityID(&hiddenIDs, hiddenSet, entry.entity.ID())
+			continue
+		}
+		if err := appendEntry(entry.encoded); err != nil {
+			return nil, nil, err
 		}
 	}
 
 	flush()
+	packets = append(packets, base.legacyPackets...)
 	return packets, hiddenIDs, nil
+}
+
+func (s *Server) buildPlayerSnapshotBase(c *Conn) (entitySnapshotPlayerBase, bool, error) {
+	if s == nil || c == nil || c.playerID == 0 {
+		return entitySnapshotPlayerBase{}, false, nil
+	}
+	var unit protocol.UnitSyncEntity
+	if snapshot := s.snapshotPlayerUnitEntity(c); snapshot != nil {
+		if !s.prepareUnitEntitySnapshot(snapshot) {
+			fmt.Printf("[net] skipped unit snapshot conn=%d player=%d unit=%d invalid_type=%d\n",
+				c.id, c.playerID, snapshot.ID(), snapshot.TypeID)
+		} else {
+			unit = snapshot
+		}
+	}
+	withUnit := &protocol.PlayerEntity{IDValue: c.playerID}
+	s.updatePlayerEntity(withUnit, c)
+	if unit != nil {
+		withUnit.Unit = protocol.UnitBox{IDValue: unit.ID()}
+	}
+	withoutUnit := *withUnit
+	withoutUnit.Unit = nil
+
+	withUnitData, err := s.encodeEntitySnapshotEntry(withUnit)
+	if err != nil {
+		return entitySnapshotPlayerBase{}, false, err
+	}
+	withoutUnitData := withUnitData
+	if unit != nil {
+		withoutUnitData, err = s.encodeEntitySnapshotEntry(&withoutUnit)
+		if err != nil {
+			return entitySnapshotPlayerBase{}, false, err
+		}
+	}
+	var unitData []byte
+	if unit != nil {
+		unitData, err = s.encodeEntitySnapshotEntry(unit)
+		if err != nil {
+			return entitySnapshotPlayerBase{}, false, err
+		}
+	}
+	return entitySnapshotPlayerBase{
+		unit:                  unit,
+		unitEncoded:           unitData,
+		playerWithUnit:        withUnit,
+		playerWithUnitData:    withUnitData,
+		playerWithoutUnit:     &withoutUnit,
+		playerWithoutUnitData: withoutUnitData,
+	}, true, nil
+}
+
+func (s *Server) connectedSnapshotPlayers() []*Conn {
+	s.mu.Lock()
+	players := make([]*Conn, 0, len(s.conns))
+	for c := range s.conns {
+		if c.hasConnected && c.playerID != 0 {
+			players = append(players, c)
+		}
+	}
+	s.mu.Unlock()
+	sort.Slice(players, func(i, j int) bool {
+		if players[i].playerID != players[j].playerID {
+			return players[i].playerID < players[j].playerID
+		}
+		return players[i].id < players[j].id
+	})
+	return players
+}
+
+func (s *Server) encodeEntitySnapshotEntry(entity protocol.UnitSyncEntity) ([]byte, error) {
+	if entity == nil {
+		return nil, nil
+	}
+	ew := protocol.NewWriterWithContext(s.TypeIO)
+	if err := ew.WriteInt32(entity.ID()); err != nil {
+		return nil, err
+	}
+	if err := ew.WriteByte(entity.ClassID()); err != nil {
+		return nil, err
+	}
+	entity.BeforeWrite()
+	if err := entity.WriteSync(ew); err != nil {
+		return nil, err
+	}
+	return ew.Bytes(), nil
 }
 
 func (s *Server) logInitialEntitySnapshotDebug(c *Conn, packets []*protocol.Remote_NetClient_entitySnapshot_32) {

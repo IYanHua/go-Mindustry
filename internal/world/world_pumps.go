@@ -33,6 +33,16 @@ type solidPumpProfile struct {
 	WarmupSpeed        float32
 }
 
+type floorPumpSourceSample struct {
+	liquid     LiquidID
+	multiplier float32
+	ok         bool
+}
+
+type solidPumpFractionSample struct {
+	fraction float32
+}
+
 var floorPumpProfilesByBlockName = map[string]floorPumpProfile{
 	"mechanical-pump": {PumpAmountPerFrame: 7.0 / 60.0, WarmupSpeed: 0.019},
 	"rotary-pump":     {PumpAmountPerFrame: 0.2, PowerPerSecond: 0.3, WarmupSpeed: 0.019},
@@ -64,16 +74,43 @@ var solidPumpProfilesByBlockName = map[string]solidPumpProfile{
 	},
 }
 
-func (w *World) stepPumpProduction(delta time.Duration) {
+func (w *World) stepPumpProduction(delta time.Duration) time.Duration {
 	if w == nil || w.model == nil {
-		return
+		return 0
 	}
 	deltaFrames := float32(delta.Seconds() * 60)
 	deltaSeconds := float32(delta.Seconds())
 	if deltaFrames <= 0 || deltaSeconds <= 0 {
-		return
+		return 0
 	}
-	for _, pos := range w.pumpTilePositions {
+	floorSamples := make([]floorPumpSourceSample, len(w.pumpTilePositions))
+	solidSamples := make([]solidPumpFractionSample, len(w.pumpTilePositions))
+	dispatch := w.parallelizeRanges(len(w.pumpTilePositions), func(_ int, start, end int) {
+		for i := start; i < end; i++ {
+			pos := w.pumpTilePositions[i]
+			if pos < 0 || int(pos) >= len(w.model.Tiles) {
+				continue
+			}
+			tile := &w.model.Tiles[pos]
+			if tile.Build == nil || tile.Block == 0 || tile.Build.Team == 0 {
+				continue
+			}
+			name := w.blockNameByID(int16(tile.Block))
+			if _, ok := floorPumpProfilesByBlockName[name]; ok {
+				liquid, multiplier, found := w.floorPumpSourceLocked(tile)
+				floorSamples[i] = floorPumpSourceSample{
+					liquid:     liquid,
+					multiplier: multiplier,
+					ok:         found,
+				}
+				continue
+			}
+			if prof, ok := solidPumpProfilesByBlockName[name]; ok {
+				solidSamples[i] = solidPumpFractionSample{fraction: w.solidPumpFractionLocked(tile, prof)}
+			}
+		}
+	})
+	for i, pos := range w.pumpTilePositions {
 		if pos < 0 || int(pos) >= len(w.model.Tiles) {
 			continue
 		}
@@ -84,30 +121,31 @@ func (w *World) stepPumpProduction(delta time.Duration) {
 		name := w.blockNameByID(int16(tile.Block))
 		if prof, ok := floorPumpProfilesByBlockName[name]; ok {
 			state := w.pumpStates[pos]
-			w.stepFloorPumpLocked(pos, tile, prof, &state, deltaFrames, deltaSeconds)
+			w.stepFloorPumpLocked(pos, tile, prof, &state, floorSamples[i], deltaFrames, deltaSeconds)
 			w.pumpStates[pos] = state
 			continue
 		}
 		if prof, ok := solidPumpProfilesByBlockName[name]; ok {
 			state := w.pumpStates[pos]
-			w.stepSolidPumpLocked(pos, tile, prof, &state, deltaFrames, deltaSeconds)
+			w.stepSolidPumpLocked(pos, tile, prof, &state, solidSamples[i], deltaFrames, deltaSeconds)
 			w.pumpStates[pos] = state
 		}
 	}
+	return dispatch.DispatchDuration
 }
 
-func (w *World) stepFloorPumpLocked(pos int32, tile *Tile, prof floorPumpProfile, state *pumpRuntimeState, deltaFrames, deltaSeconds float32) {
+func (w *World) stepFloorPumpLocked(pos int32, tile *Tile, prof floorPumpProfile, state *pumpRuntimeState, sample floorPumpSourceSample, deltaFrames, deltaSeconds float32) {
 	if tile == nil || tile.Build == nil || state == nil {
 		return
 	}
-	liquid, multiplier, ok := w.floorPumpSourceLocked(tile)
-	if !ok || multiplier <= 0 {
+	deltaFrames, deltaSeconds = w.scaledBuildingDeltaLocked(pos, deltaFrames, deltaSeconds)
+	if !sample.ok || sample.multiplier <= 0 {
 		state.Warmup = approachf(state.Warmup, 0, prof.WarmupSpeed*deltaFrames)
 		return
 	}
 	if totalBuildingLiquids(tile.Build) >= w.liquidCapacityForBlockLocked(tile)-0.001 {
 		state.Warmup = approachf(state.Warmup, 0, prof.WarmupSpeed*deltaFrames)
-		_ = w.dumpLiquidLocked(pos, tile, liquid, deltaFrames)
+		_ = w.dumpLiquidLocked(pos, tile, sample.liquid, deltaFrames)
 		return
 	}
 	if prof.PowerPerSecond > 0 && !w.requirePowerAtLocked(pos, tile.Build.Team, prof.PowerPerSecond*deltaSeconds) {
@@ -118,33 +156,34 @@ func (w *World) stepFloorPumpLocked(pos int32, tile *Tile, prof floorPumpProfile
 	space := capacity - totalBuildingLiquids(tile.Build)
 	if space <= 0 {
 		state.Warmup = approachf(state.Warmup, 0, prof.WarmupSpeed*deltaFrames)
-		_ = w.dumpLiquidLocked(pos, tile, liquid, deltaFrames)
+		_ = w.dumpLiquidLocked(pos, tile, sample.liquid, deltaFrames)
 		return
 	}
-	produced := prof.PumpAmountPerFrame * multiplier * deltaFrames
+	produced := prof.PumpAmountPerFrame * sample.multiplier * deltaFrames
 	if produced > space {
 		produced = space
 	}
 	if produced > 0 {
-		tile.Build.AddLiquid(liquid, produced)
+		tile.Build.AddLiquid(sample.liquid, produced)
 		state.Warmup = approachf(state.Warmup, 1, prof.WarmupSpeed*deltaFrames)
 	} else {
 		state.Warmup = approachf(state.Warmup, 0, prof.WarmupSpeed*deltaFrames)
 	}
 	state.Progress += state.Warmup * deltaFrames
-	_ = w.dumpLiquidLocked(pos, tile, liquid, deltaFrames)
+	_ = w.dumpLiquidLocked(pos, tile, sample.liquid, deltaFrames)
 }
 
-func (w *World) stepSolidPumpLocked(pos int32, tile *Tile, prof solidPumpProfile, state *pumpRuntimeState, deltaFrames, deltaSeconds float32) {
+func (w *World) stepSolidPumpLocked(pos int32, tile *Tile, prof solidPumpProfile, state *pumpRuntimeState, sample solidPumpFractionSample, deltaFrames, deltaSeconds float32) {
 	if tile == nil || tile.Build == nil || state == nil {
 		return
 	}
+	deltaFrames, deltaSeconds = w.scaledBuildingDeltaLocked(pos, deltaFrames, deltaSeconds)
 	if tile.Build.LiquidAmount(prof.Result) >= w.liquidCapacityForBlockLocked(tile)-0.001 {
 		state.Warmup = approachf(state.Warmup, 0, prof.WarmupSpeed*deltaFrames)
 		_ = w.dumpLiquidLocked(pos, tile, prof.Result, deltaFrames)
 		return
 	}
-	fraction := w.solidPumpFractionLocked(tile, prof)
+	fraction := sample.fraction
 	if fraction <= 0 {
 		state.Warmup = approachf(state.Warmup, 0, prof.WarmupSpeed*deltaFrames)
 		return

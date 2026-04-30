@@ -120,7 +120,7 @@ func RunChildCore(role, endpoint string, parentPID int, persistCfg ...config.Per
 
 	switch role {
 	case "core2":
-		c2 := NewCore2(Config{Name: "core2-child", MessageBuf: 30000, WorkerCount: 2})
+		c2 := NewCore2(Config{Name: "core2-child", MessageBuf: 128, WorkerCount: 1})
 		c2.SetPersistConfig(core2PersistCfg)
 		c2.Start()
 		defer c2.Stop()
@@ -187,8 +187,9 @@ func RunChildCore(role, endpoint string, parentPID int, persistCfg ...config.Per
 			}
 		})
 	case "core3":
-		c3 := NewCore3(Config{Name: "core3-child", MessageBuf: 1024, WorkerCount: 1})
+		c3 := NewCore3(Config{Name: "core3-child", MessageBuf: 32, WorkerCount: 1})
 		c3.SetCacheBaseModel(false)
+		c3.SetCopyOnRead(false)
 		c3.Start()
 		defer c3.Stop()
 		return serveChildCore(role, ln, func(method string, payload json.RawMessage) (any, error) {
@@ -227,7 +228,7 @@ func RunChildCore(role, endpoint string, parentPID int, persistCfg ...config.Per
 			}
 		})
 	case "core4":
-		c4 := NewCore4(Config{Name: "core4-child", MessageBuf: 1024, WorkerCount: 1})
+		c4 := NewCore4(Config{Name: "core4-child", MessageBuf: 64, WorkerCount: 1})
 		c4.Start()
 		defer c4.Stop()
 		return serveChildCore(role, ln, func(method string, payload json.RawMessage) (any, error) {

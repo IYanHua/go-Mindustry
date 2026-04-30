@@ -416,6 +416,7 @@ func (w *World) stepGenericCrafterLocked(pos int32, tile *Tile, prof crafterProf
 	if tile == nil || tile.Build == nil || state == nil || prof.CraftTimeFrames <= 0 {
 		return
 	}
+	deltaFrames, deltaSeconds = w.scaledBuildingDeltaLocked(pos, deltaFrames, deltaSeconds)
 	active := w.genericCrafterCanRunLocked(pos, tile, prof, deltaFrames, deltaSeconds)
 	efficiencyMul := w.crafterEfficiencyMultiplierLocked(pos, tile, prof)
 	if active {
@@ -475,6 +476,7 @@ func (w *World) stepSeparatorLocked(pos int32, tile *Tile, prof separatorProfile
 	if tile == nil || tile.Build == nil || state == nil || prof.CraftTimeFrames <= 0 {
 		return
 	}
+	deltaFrames, deltaSeconds = w.scaledBuildingDeltaLocked(pos, deltaFrames, deltaSeconds)
 	active := separatorStoredOutputsLocked(tile.Build, prof.InputItems) < prof.ItemCapacity
 	if active && !hasRequiredItemsLocked(tile.Build, prof.InputItems) {
 		active = false

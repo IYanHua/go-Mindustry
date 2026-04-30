@@ -321,9 +321,8 @@ func (w *World) acquireBuildingWeaponTarget(src RawEntity, state *buildCombatSta
 		return -1, -1, 0, 0
 	}
 	if prof.HitBuildings && prof.TargetBuilds {
-		if bpos, tx, ty, ok := w.findNearestEnemyBuilding(src, prof.Range); ok {
+		if bpos, tx, ty, ok := w.acquireBuildingWeaponBuildTargetLocked(src, state, prof); ok {
 			state.TargetID = 0
-			state.RetargetCD = 0
 			return -1, bpos, tx, ty
 		}
 	}
@@ -341,13 +340,54 @@ func (w *World) acquireBuildingWeaponTarget(src RawEntity, state *buildCombatSta
 	if prof.HitBuildings {
 		if prof.TargetBuilds {
 			state.TargetID = 0
-			state.RetargetCD = 0
 		}
-		if bpos, tx, ty, ok := w.findNearestEnemyBuilding(src, prof.Range); ok {
+		if bpos, tx, ty, ok := w.acquireBuildingWeaponBuildTargetLocked(src, state, prof); ok {
 			return -1, bpos, tx, ty
 		}
 	}
 	return -1, -1, 0, 0
+}
+
+func (w *World) acquireBuildingWeaponBuildTargetLocked(src RawEntity, state *buildCombatState, prof buildingWeaponProfile) (int32, float32, float32, bool) {
+	if w == nil || state == nil || w.model == nil || src.Team == 0 || prof.Range <= 0 {
+		return -1, 0, 0, false
+	}
+	if state.TargetBuildOK {
+		if tx, ty, ok := w.validBuildingWeaponBuildTargetLocked(src, prof, state.TargetBuildPos); ok {
+			return state.TargetBuildPos, tx, ty, true
+		}
+		state.TargetBuildOK = false
+		state.TargetBuildPos = 0
+	}
+	if state.BuildTargetCD > 0 {
+		return -1, 0, 0, false
+	}
+	if bpos, tx, ty, ok := w.findNearestEnemyBuilding(src, prof.Range); ok {
+		state.TargetBuildPos = bpos
+		state.TargetBuildOK = true
+		state.BuildTargetCD = buildingWeaponRetargetDelay(prof, true)
+		return bpos, tx, ty, true
+	}
+	state.BuildTargetCD = buildingWeaponRetargetDelay(prof, false)
+	return -1, 0, 0, false
+}
+
+func (w *World) validBuildingWeaponBuildTargetLocked(src RawEntity, prof buildingWeaponProfile, pos int32) (float32, float32, bool) {
+	if w == nil || w.model == nil || pos < 0 || int(pos) >= len(w.model.Tiles) || src.Team == 0 || prof.Range <= 0 {
+		return 0, 0, false
+	}
+	tile := &w.model.Tiles[pos]
+	if tile.Build == nil || tile.Build.Health <= 0 || tile.Build.Team == 0 || tile.Build.Team == src.Team {
+		return 0, 0, false
+	}
+	tx := float32(tile.X*8 + 4)
+	ty := float32(tile.Y*8 + 4)
+	dx := tx - src.X
+	dy := ty - src.Y
+	if dx*dx+dy*dy > prof.Range*prof.Range {
+		return 0, 0, false
+	}
+	return tx, ty, true
 }
 
 func (w *World) updateBuildingContinuousBeam(src *RawEntity, state *buildCombatState, prof buildingWeaponProfile, hasAim, keepAliveInput bool, tx, ty, dt float32) bool {

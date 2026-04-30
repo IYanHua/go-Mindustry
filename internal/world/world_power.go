@@ -785,6 +785,21 @@ func (w *World) buildPowerNetsLocked() {
 	for pos := range w.powerNetByPos {
 		delete(w.powerNetByPos, pos)
 	}
+	w.powerNetIDs = w.powerNetIDs[:0]
+	if w.powerNetTeams == nil {
+		w.powerNetTeams = map[int32]TeamID{}
+	} else {
+		for id := range w.powerNetTeams {
+			delete(w.powerNetTeams, id)
+		}
+	}
+	if w.powerNetStorageRefs == nil {
+		w.powerNetStorageRefs = map[int32][]powerStorageRef{}
+	} else {
+		for id := range w.powerNetStorageRefs {
+			delete(w.powerNetStorageRefs, id)
+		}
+	}
 	relevant := map[int32]*Tile{}
 	positions := make([]int32, 0, len(w.powerTilePositions))
 	for _, pos := range w.powerTilePositions {
@@ -886,6 +901,26 @@ func (w *World) buildPowerNetsLocked() {
 		for _, pos := range component {
 			w.powerNetByPos[pos] = graphID
 		}
+		w.powerNetIDs = append(w.powerNetIDs, graphID)
+		team := TeamID(0)
+		storage := w.powerNetStorageRefs[graphID]
+		storage = storage[:0]
+		for _, pos := range component {
+			tile := relevant[pos]
+			if tile == nil || tile.Build == nil {
+				continue
+			}
+			if team == 0 {
+				team = tile.Build.Team
+			}
+			if capacity := w.powerStorageCapacityForBlockID(int16(tile.Block)); capacity > 0 {
+				storage = append(storage, powerStorageRef{Pos: pos, Capacity: capacity})
+			}
+		}
+		w.powerNetTeams[graphID] = team
+		if len(storage) > 0 {
+			w.powerNetStorageRefs[graphID] = storage
+		}
 	}
 }
 
@@ -893,31 +928,33 @@ func (w *World) rebuildPowerNetStatesLocked() {
 	if w == nil || w.model == nil {
 		return
 	}
-	for _, pos := range w.powerTilePositions {
-		if pos < 0 || int(pos) >= len(w.model.Tiles) {
-			continue
-		}
-		tile := &w.model.Tiles[pos]
-		if !w.isPowerRelevantBuildingLocked(tile) || isPowerDiodeBlockName(w.blockNameByID(int16(tile.Block))) {
-			continue
-		}
-		netID, ok := w.powerNetByPos[pos]
-		if !ok {
-			continue
-		}
+	for _, netID := range w.powerNetIDs {
 		net := w.powerNetStates[netID]
 		if net == nil {
-			net = &powerNetState{Team: tile.Build.Team}
+			net = &powerNetState{}
 			w.powerNetStates[netID] = net
 		}
-		capacity := powerStorageCapacityByBlockName(w.blockNameByID(int16(tile.Block)))
-		if capacity <= 0 {
-			continue
+		net.Team = w.powerNetTeams[netID]
+		net.Budget = 0
+		net.Capacity = 0
+		net.Produced = 0
+		net.Consumed = 0
+		net.Storage = w.powerNetStorageRefs[netID]
+		for _, ref := range net.Storage {
+			net.Budget += clampf(w.powerStorageState[ref.Pos], 0, ref.Capacity)
+			net.Capacity += ref.Capacity
 		}
-		net.Budget += clampf(w.powerStorageState[pos], 0, capacity)
-		net.Capacity += capacity
-		net.Storage = append(net.Storage, powerStorageRef{Pos: pos, Capacity: capacity})
 	}
+}
+
+func (w *World) powerStorageCapacityForBlockID(blockID int16) float32 {
+	if w == nil || blockID <= 0 {
+		return 0
+	}
+	if idx := int(blockID); idx < len(w.powerStorageCapacityByBlock) {
+		return w.powerStorageCapacityByBlock[idx]
+	}
+	return powerStorageCapacityByBlockName(w.blockNameByID(blockID))
 }
 
 func (w *World) stepPowerDiodesLocked() {

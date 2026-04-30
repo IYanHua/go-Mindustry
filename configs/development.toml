@@ -14,3 +14,6 @@ respawn_packet_logs_enabled = false
 respawn_unit_logs_enabled = false
 terminal_player_logs_enabled = true
 terminal_player_uuid_enabled = false
+
+[runtime]
+devlog_enabled = false

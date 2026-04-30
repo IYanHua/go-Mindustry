@@ -185,6 +185,12 @@ func stepForSeconds(w *World, seconds float32) {
 	}
 }
 
+func stepForTicks(w *World, ticks int) {
+	for i := 0; i < ticks; i++ {
+		w.Step(time.Second / 60)
+	}
+}
+
 func TestRebuildBlockOccupancyIndexesPhaseBuckets(t *testing.T) {
 	w := New(Config{TPS: 60})
 	model := NewWorldModel(24, 24)
@@ -7646,6 +7652,35 @@ func TestUnloaderPrefersOnlyGiveSourceOverFactoryInputBuffer(t *testing.T) {
 	}
 }
 
+func TestDumpProximityCacheRebuildsAfterNeighborRemoval(t *testing.T) {
+	w := New(Config{TPS: 60})
+	model := NewWorldModel(10, 10)
+	model.BlockNames = map[int16]string{
+		257: "conveyor",
+		500: "container",
+	}
+	w.SetModel(model)
+
+	src := placeTestBuilding(t, w, 4, 4, 257, 1, 0)
+	dst := placeTestBuilding(t, w, 5, 4, 500, 1, 0)
+	srcPos := int32(src.Y*model.Width + src.X)
+
+	neighbors := w.dumpProximityLocked(srcPos)
+	if len(neighbors) != 1 || neighbors[0] != int32(dst.Y*model.Width+dst.X) {
+		t.Fatalf("expected initial dump proximity to contain destination, got %v", neighbors)
+	}
+
+	dst.Block = 0
+	dst.Team = 0
+	dst.Build = nil
+	w.rebuildBlockOccupancyLocked()
+
+	neighbors = w.dumpProximityLocked(srcPos)
+	if len(neighbors) != 0 {
+		t.Fatalf("expected dump proximity cache to rebuild after neighbor removal, got %v", neighbors)
+	}
+}
+
 func TestUnloaderRespectsAllowCoreUnloadersRuleForLinkedCoreStorage(t *testing.T) {
 	w := New(Config{TPS: 60})
 	model := NewWorldModel(12, 12)
@@ -8911,6 +8946,44 @@ func TestFlyingAIIgnoresGroundWallPathing(t *testing.T) {
 	}
 	if math.Abs(float64(got.Y-startY)) > 12 {
 		t.Fatalf("expected flying AI to keep a mostly direct line, startY=%f gotY=%f", startY, got.Y)
+	}
+}
+
+func TestNavalAIIgnoresGroundWallPathing(t *testing.T) {
+	w := New(Config{TPS: 60})
+	model := NewWorldModel(24, 24)
+	model.BlockNames = map[int16]string{
+		339: "core-shard",
+		600: "test-wall",
+	}
+	model.UnitNames = map[int16]string{
+		25: "minke",
+	}
+	w.SetModel(model)
+	w.unitRuntimeProfilesByName["minke"] = unitRuntimeProfile{Name: "minke", Speed: 24}
+
+	placeTestBuilding(t, w, 3, 12, 339, 1, 0)
+	for y := 0; y < 24; y++ {
+		placeTestBuilding(t, w, 10, y, 600, 1, 0)
+	}
+
+	startX := float32(20*8 + 4)
+	startY := float32(12*8 + 4)
+	ent := w.Model().AddEntity(RawEntity{
+		TypeID:      25,
+		X:           startX,
+		Y:           startY,
+		Team:        2,
+		MineTilePos: invalidEntityTilePos,
+	})
+
+	stepForSeconds(w, 3)
+	got := findTestEntity(t, w, ent.ID)
+	if got.X >= startX-24 {
+		t.Fatalf("expected naval AI to keep advancing without ground A*, startX=%f gotX=%f", startX, got.X)
+	}
+	if math.Abs(float64(got.Y-startY)) > 12 {
+		t.Fatalf("expected naval AI to keep a mostly direct line, startY=%f gotY=%f", startY, got.Y)
 	}
 }
 
@@ -11350,6 +11423,260 @@ func TestTargetBuildsTurretPrioritizesBuilding(t *testing.T) {
 	}
 	if got := findTestEntity(t, w, 1).Health; math.Abs(float64(got-100)) > 0.001 {
 		t.Fatalf("expected off-axis unit to be ignored while turret targets building, health=%f", got)
+	}
+}
+
+func TestOverdriveProjectorBoostsGraphitePress(t *testing.T) {
+	w := New(Config{TPS: 60})
+	model := NewWorldModel(20, 20)
+	model.BlockNames = map[int16]string{
+		900: "overdrive-projector",
+		901: "graphite-press",
+	}
+	w.SetModel(model)
+
+	projector := placeTestBuilding(t, w, 8, 8, 900, 1, 0)
+	press := placeTestBuilding(t, w, 10, 8, 901, 1, 0)
+	press.Build.AddItem(coalItemID, 2)
+	w.rebuildActiveTilesLocked()
+
+	projectorPos := int32(projector.Y*w.Model().Width + projector.X)
+	pressPos := int32(press.Y*w.Model().Width + press.X)
+	w.overdriveProjectorStateLocked(projectorPos).Charge = overdriveProjectorProfiles["overdrive-projector"].Reload
+
+	w.Step(time.Second / 60)
+
+	if got := w.buildingTimeScaleLocked(pressPos); got <= 1 {
+		t.Fatalf("expected overdrive projector to apply a boost, timeScale=%f", got)
+	}
+
+	stepForTicks(w, 59)
+
+	if got := press.Build.ItemAmount(graphiteItemID); got != 1 {
+		t.Fatalf("expected boosted graphite press to finish one craft in 60 ticks, amount=%d", got)
+	}
+}
+
+func TestSingleTickBuildingBoostLastsThroughCurrentStep(t *testing.T) {
+	w := New(Config{TPS: 60})
+	model := NewWorldModel(20, 20)
+	model.BlockNames = map[int16]string{
+		901: "graphite-press",
+	}
+	w.SetModel(model)
+
+	press := placeTestBuilding(t, w, 10, 8, 901, 1, 0)
+	press.Build.AddItem(coalItemID, 2)
+	w.rebuildActiveTilesLocked()
+
+	pressPos := int32(press.Y*w.Model().Width + press.X)
+	w.applyBuildingBoostLocked(pressPos, 1.5, 0.5)
+
+	w.Step(time.Second / 60)
+
+	state, ok := w.crafterStates[pressPos]
+	if !ok {
+		t.Fatal("expected graphite press runtime state to exist after stepping")
+	}
+	expected := float32(1.5 / 90.0)
+	if math.Abs(float64(state.Progress-expected)) > 0.0001 {
+		t.Fatalf("expected one boosted tick of crafter progress, progress=%f want=%f", state.Progress, expected)
+	}
+	if got := w.buildingTimeScaleLocked(pressPos); got != 1 {
+		t.Fatalf("expected one-tick boost to expire after work completes, timeScale=%f", got)
+	}
+}
+
+func TestOverdriveDomeMatchesVanillaBuild157Profile(t *testing.T) {
+	prof, ok := overdriveProjectorProfiles["overdrive-dome"]
+	if !ok {
+		t.Fatal("expected overdrive-dome profile to exist")
+	}
+	if prof.Range != 200 || prof.Reload != 60 {
+		t.Fatalf("unexpected overdrive-dome range/reload: %+v", prof)
+	}
+	if prof.SpeedBoost != 2.5 {
+		t.Fatalf("expected overdrive-dome speed boost 2.5, got %f", prof.SpeedBoost)
+	}
+	if prof.UseTime != 300 {
+		t.Fatalf("expected overdrive-dome use time 300, got %f", prof.UseTime)
+	}
+	if prof.HasBoost {
+		t.Fatal("expected overdrive-dome to disable phase item boosting in 157.4")
+	}
+}
+
+func TestOverdriveProjectorSpeedsArcCooldown(t *testing.T) {
+	w := New(Config{TPS: 60})
+	model := NewWorldModel(24, 24)
+	model.BlockNames = map[int16]string{
+		900: "overdrive-projector",
+		911: "arc",
+	}
+	model.UnitNames = map[int16]string{
+		35: "alpha",
+	}
+	w.SetModel(model)
+	w.buildingProfilesByName["arc"] = buildingWeaponProfile{
+		ClassName:     "PowerTurret",
+		Range:         88,
+		Damage:        24,
+		Interval:      0.42,
+		PowerCapacity: 140,
+		PowerPerShot:  30,
+		TargetAir:     true,
+		TargetGround:  true,
+		HitBuildings:  true,
+	}
+
+	projector := placeTestBuilding(t, w, 8, 8, 900, 1, 0)
+	arc := placeTestBuilding(t, w, 10, 8, 911, 1, 0)
+	arcPos := int32(arc.Y*w.Model().Width + arc.X)
+	w.buildStates[arcPos] = buildCombatState{
+		Power:          60,
+		TurretRotation: 0,
+		HasRotation:    true,
+	}
+	w.Model().AddEntity(RawEntity{
+		ID:                  1,
+		TypeID:              35,
+		Team:                2,
+		X:                   float32(11*8 + 4),
+		Y:                   float32(8*8 + 4),
+		Health:              100,
+		MaxHealth:           100,
+		SlowMul:             1,
+		StatusDamageMul:     1,
+		StatusHealthMul:     1,
+		StatusSpeedMul:      1,
+		StatusReloadMul:     1,
+		StatusBuildSpeedMul: 1,
+		StatusDragMul:       1,
+		StatusArmorOverride: -1,
+		RuntimeInit:         true,
+	})
+	w.rebuildActiveTilesLocked()
+
+	projectorPos := int32(projector.Y*w.Model().Width + projector.X)
+	w.overdriveProjectorStateLocked(projectorPos).Charge = overdriveProjectorProfiles["overdrive-projector"].Reload
+
+	w.Step(time.Second / 60)
+
+	if got := w.buildingTimeScaleLocked(arcPos); got <= 1 {
+		t.Fatalf("expected arc turret to receive overdrive boost, timeScale=%f", got)
+	}
+
+	stepForSeconds(w, 0.35)
+
+	if got := findTestEntity(t, w, 1).Health; got > 52.001 {
+		t.Fatalf("expected boosted arc turret to fire twice within 0.35s, target health=%f", got)
+	}
+}
+
+func TestOverdriveProjectorSkipsVanillaNonBoostableBlocks(t *testing.T) {
+	w := New(Config{TPS: 60})
+	model := NewWorldModel(24, 24)
+	model.BlockNames = map[int16]string{
+		900: "overdrive-projector",
+		901: "graphite-press",
+		902: "battery",
+		903: "core-shard",
+		904: "landing-pad",
+		905: "tile-logic-display",
+	}
+	w.SetModel(model)
+
+	projector := placeTestBuilding(t, w, 8, 8, 900, 1, 0)
+	press := placeTestBuilding(t, w, 10, 8, 901, 1, 0)
+	battery := placeTestBuilding(t, w, 8, 10, 902, 1, 0)
+	core := placeTestBuilding(t, w, 10, 10, 903, 1, 0)
+	landingPad := placeTestBuilding(t, w, 12, 8, 904, 1, 0)
+	display := placeTestBuilding(t, w, 12, 10, 905, 1, 0)
+	press.Build.AddItem(coalItemID, 2)
+	w.rebuildActiveTilesLocked()
+
+	projectorPos := int32(projector.Y*w.Model().Width + projector.X)
+	pressPos := int32(press.Y*w.Model().Width + press.X)
+	batteryPos := int32(battery.Y*w.Model().Width + battery.X)
+	corePos := int32(core.Y*w.Model().Width + core.X)
+	landingPadPos := int32(landingPad.Y*w.Model().Width + landingPad.X)
+	displayPos := int32(display.Y*w.Model().Width + display.X)
+	w.overdriveProjectorStateLocked(projectorPos).Charge = overdriveProjectorProfiles["overdrive-projector"].Reload
+
+	w.Step(time.Second / 60)
+
+	if got := w.buildingTimeScaleLocked(projectorPos); got != 1 {
+		t.Fatalf("expected overdrive projector to ignore itself, timeScale=%f", got)
+	}
+	if got := w.buildingTimeScaleLocked(pressPos); got <= 1 {
+		t.Fatalf("expected graphite press to receive overdrive boost, timeScale=%f", got)
+	}
+	if got := w.buildingTimeScaleLocked(batteryPos); got != 1 {
+		t.Fatalf("expected battery to stay unboosted, timeScale=%f", got)
+	}
+	if got := w.buildingTimeScaleLocked(corePos); got != 1 {
+		t.Fatalf("expected core to stay unboosted, timeScale=%f", got)
+	}
+	if got := w.buildingTimeScaleLocked(landingPadPos); got != 1 {
+		t.Fatalf("expected landing pad to stay unboosted, timeScale=%f", got)
+	}
+	if got := w.buildingTimeScaleLocked(displayPos); got != 1 {
+		t.Fatalf("expected tile logic display to stay unboosted, timeScale=%f", got)
+	}
+}
+
+func TestDestroyingBoostedBuildingClearsBoostState(t *testing.T) {
+	w := New(Config{TPS: 60})
+	model := NewWorldModel(20, 20)
+	model.BlockNames = map[int16]string{
+		900: "overdrive-projector",
+		901: "graphite-press",
+	}
+	w.SetModel(model)
+
+	projector := placeTestBuilding(t, w, 8, 8, 900, 1, 0)
+	press := placeTestBuilding(t, w, 10, 8, 901, 1, 0)
+	press.Build.AddItem(coalItemID, 2)
+	w.rebuildActiveTilesLocked()
+
+	projectorPos := int32(projector.Y*w.Model().Width + projector.X)
+	pressPos := int32(press.Y*w.Model().Width + press.X)
+	w.overdriveProjectorStateLocked(projectorPos).Charge = overdriveProjectorProfiles["overdrive-projector"].Reload
+
+	w.Step(time.Second / 60)
+
+	if got := w.buildingTimeScaleLocked(pressPos); got <= 1 {
+		t.Fatalf("expected graphite press to receive overdrive boost, timeScale=%f", got)
+	}
+
+	if !w.applyDamageToBuildingRaw(pressPos, 5000) {
+		t.Fatal("expected graphite press destruction to succeed")
+	}
+	if _, ok := w.buildingBoostStates[pressPos]; ok {
+		t.Fatal("expected boosted building state to clear on destruction")
+	}
+	if got := w.buildingTimeScaleLocked(pressPos); got != 1 {
+		t.Fatalf("expected destroyed building timeScale to reset, got %f", got)
+	}
+}
+
+func TestDestroyingOverdriveProjectorClearsRuntimeState(t *testing.T) {
+	w := New(Config{TPS: 60})
+	model := NewWorldModel(20, 20)
+	model.BlockNames = map[int16]string{
+		900: "overdrive-projector",
+	}
+	w.SetModel(model)
+
+	projector := placeTestBuilding(t, w, 8, 8, 900, 1, 0)
+	projectorPos := int32(projector.Y*w.Model().Width + projector.X)
+	w.overdriveProjectorStateLocked(projectorPos).Charge = 10
+
+	if !w.applyDamageToBuildingRaw(projectorPos, 5000) {
+		t.Fatal("expected overdrive projector destruction to succeed")
+	}
+	if _, ok := w.overdriveProjectorStates[projectorPos]; ok {
+		t.Fatal("expected overdrive projector runtime state to clear on destruction")
 	}
 }
 

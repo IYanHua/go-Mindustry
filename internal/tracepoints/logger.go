@@ -7,6 +7,8 @@ import (
 	"path/filepath"
 	"sync"
 	"time"
+
+	"mdt-server/internal/protocol"
 )
 
 type Event struct {
@@ -128,10 +130,31 @@ func PacketFields(direction string, obj any, packetID, frameworkID, size int, ex
 		"packet_id":    packetID,
 		"framework_id": frameworkID,
 		"size":         size,
-		"summary":      fmt.Sprintf("%+v", obj),
+		"summary":      packetSummary(obj, size),
 	}
 	for k, v := range extra {
 		fields[k] = v
 	}
 	return fields
+}
+
+func packetSummary(obj any, size int) string {
+	switch p := obj.(type) {
+	case *protocol.StreamBegin:
+		return fmt.Sprintf("streamBegin id=%d total=%d type=%d", p.ID, p.Total, p.Type)
+	case *protocol.StreamChunk:
+		return fmt.Sprintf("streamChunk id=%d bytes=%d", p.ID, len(p.Data))
+	case *protocol.WorldStream:
+		return "worldStream"
+	case *protocol.Remote_NetClient_blockSnapshot_34:
+		return fmt.Sprintf("blockSnapshot amount=%d bytes=%d", p.Amount, len(p.Data))
+	case *protocol.Remote_NetClient_entitySnapshot_32:
+		return fmt.Sprintf("entitySnapshot amount=%d bytes=%d", p.Amount, len(p.Data))
+	case *protocol.Remote_NetClient_stateSnapshot_35:
+		return fmt.Sprintf("stateSnapshot wave=%d waveTime=%.2f tps=%d coreBytes=%d", p.Wave, p.WaveTime, p.Tps, len(p.CoreData))
+	}
+	if size > 256 {
+		return fmt.Sprintf("%T size=%d", obj, size)
+	}
+	return fmt.Sprintf("%+v", obj)
 }

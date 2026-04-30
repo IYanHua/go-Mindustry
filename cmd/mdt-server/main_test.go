@@ -166,6 +166,9 @@ func TestBuildRuntimeRulesRawAvoidsInjectingComplexRuleObjects(t *testing.T) {
 	if got, _ := decoded["planet"].(string); got != "erekir" {
 		t.Fatalf("expected planet to remain untouched, got %#v", decoded["planet"])
 	}
+	if got, _ := decoded["waveSpacing"].(float64); got != 7200 {
+		t.Fatalf("expected runtime rules to emit vanilla tick waveSpacing=7200, got %#v", decoded["waveSpacing"])
+	}
 	if got, _ := decoded["fog"].(bool); got {
 		t.Fatal("expected runtime rules to disable unsupported fog sync")
 	}
@@ -326,7 +329,7 @@ func TestLoadWorldStreamAcceptsLegacyMSAVVersion(t *testing.T) {
 	}
 }
 
-func TestBuildInitialWorldDataPayloadPrefersLiveModelSnapshotForInitialJoin(t *testing.T) {
+func TestBuildInitialWorldDataPayloadPrefersCachedMSAVWorldStreamForInitialJoin(t *testing.T) {
 	path := filepath.Join("assets", "worlds", "maps", "serpulo", "hidden", "138.msav")
 	if _, err := os.Stat(path); err != nil {
 		if os.IsNotExist(err) {
@@ -342,19 +345,19 @@ func TestBuildInitialWorldDataPayloadPrefersLiveModelSnapshotForInitialJoin(t *t
 	w := world.New(world.Config{TPS: 60})
 	w.SetModel(model)
 
-	liveModel := w.CloneModelForWorldStream()
-	if liveModel == nil {
-		t.Fatal("expected live model clone")
-	}
-	expectedPayload, err := worldstream.BuildWorldStreamFromModelSnapshot(liveModel, 1, w.Snapshot())
-	if err != nil {
-		t.Fatalf("build expected live world payload: %v", err)
-	}
-
 	cache := &worldCache{}
 	basePayload, err := cache.get(path)
 	if err != nil {
 		t.Fatalf("cache get base payload: %v", err)
+	}
+	snap := w.Snapshot()
+	expectedPayload, err := worldstream.RewriteRuntimeStateInWorldStream(basePayload, snap.Wave, snap.WaveTimeTicks(), float64(snap.Tick), 1)
+	if err != nil {
+		t.Fatalf("rewrite expected runtime state: %v", err)
+	}
+	expectedPayload, err = worldstream.RewriteRulesInWorldStream(expectedPayload, buildRuntimeRulesRaw(w, path))
+	if err != nil {
+		t.Fatalf("rewrite expected rules: %v", err)
 	}
 	srv := netserver.NewServer("127.0.0.1:0", 157)
 	serverSide, clientSide := net.Pipe()
@@ -372,18 +375,18 @@ func TestBuildInitialWorldDataPayloadPrefersLiveModelSnapshotForInitialJoin(t *t
 	if len(payload) == 0 {
 		t.Fatal("expected non-empty initial world payload")
 	}
-	if !conn.UsesLiveWorldStream() {
-		t.Fatal("expected initial join live snapshot path to enable live world stream mode")
+	if conn.UsesLiveWorldStream() {
+		t.Fatal("expected initial join to stay on cached msav world stream mode")
 	}
 	if bytes.Equal(payload, basePayload) {
-		t.Fatal("expected initial world payload to use live world snapshot instead of base msav cache")
+		t.Fatal("expected initial world payload to patch runtime state/rules on top of base msav cache")
 	}
 	if !bytes.Equal(payload, expectedPayload) {
-		t.Fatal("expected initial world payload to use live world snapshot bytes")
+		t.Fatal("expected initial world payload to use patched cached msav worldstream bytes")
 	}
 }
 
-func TestBuildInitialWorldDataPayloadPrefersLiveModelSnapshotWithBundledMap(t *testing.T) {
+func TestBuildInitialWorldDataPayloadKeepsBundledMapOnCachedMSAVPath(t *testing.T) {
 	path := filepath.Join("assets", "worlds", "file.msav")
 	if _, err := os.Stat(path); err != nil {
 		if os.IsNotExist(err) {
@@ -404,23 +407,19 @@ func TestBuildInitialWorldDataPayloadPrefersLiveModelSnapshotWithBundledMap(t *t
 	w.SetModel(liveModelBase)
 	w.ConfigureBuildingPacked(nodePos, targetPos)
 
-	liveModel := w.CloneModelForWorldStream()
-	if liveModel == nil {
-		t.Fatal("expected live model clone")
-	}
-	expectedPayload, err := worldstream.BuildWorldStreamFromModelSnapshot(liveModel, 1, w.Snapshot())
-	if err != nil {
-		t.Fatalf("build expected live world payload: %v", err)
-	}
-	expectedPayload, err = worldstream.RewriteRulesInWorldStream(expectedPayload, buildRuntimeRulesRaw(w, path))
-	if err != nil {
-		t.Fatalf("rewrite expected live rules: %v", err)
-	}
-
+	snap := w.Snapshot()
 	cache := &worldCache{}
 	basePayload, err := cache.get(path)
 	if err != nil {
 		t.Fatalf("cache get base payload: %v", err)
+	}
+	expectedPayload, err := worldstream.RewriteRuntimeStateInWorldStream(basePayload, snap.Wave, snap.WaveTimeTicks(), float64(snap.Tick), 1)
+	if err != nil {
+		t.Fatalf("rewrite expected runtime state: %v", err)
+	}
+	expectedPayload, err = worldstream.RewriteRulesInWorldStream(expectedPayload, buildRuntimeRulesRaw(w, path))
+	if err != nil {
+		t.Fatalf("rewrite expected rules: %v", err)
 	}
 	srv := netserver.NewServer("127.0.0.1:0", 157)
 	serverSide, clientSide := net.Pipe()
@@ -437,14 +436,14 @@ func TestBuildInitialWorldDataPayloadPrefersLiveModelSnapshotWithBundledMap(t *t
 	if len(payload) == 0 {
 		t.Fatal("expected non-empty initial world payload")
 	}
-	if !conn.UsesLiveWorldStream() {
-		t.Fatal("expected bundled-map initial join to enable live world stream mode")
+	if conn.UsesLiveWorldStream() {
+		t.Fatal("expected bundled-map initial join to stay on cached msav world stream mode")
 	}
 	if bytes.Equal(payload, basePayload) {
-		t.Fatal("expected initial world payload to prefer live world snapshot over cached base worldstream")
+		t.Fatal("expected initial world payload to patch runtime state/rules on top of cached base worldstream")
 	}
 	if !bytes.Equal(payload, expectedPayload) {
-		t.Fatal("expected initial world payload to match live world snapshot bytes")
+		t.Fatal("expected initial world payload to match patched cached worldstream bytes")
 	}
 }
 
@@ -1234,7 +1233,7 @@ func TestSyncAuthoritativeWorldToConnRepairsUnsupportedLiveWorldStreamBuildings(
 	}
 }
 
-func TestSyncAuthoritativeWorldToConnWithBaseModelStillReplaysRuntimeBlockSnapshots(t *testing.T) {
+func TestSyncAuthoritativeWorldToConnWithMatchingBaseAvoidsRuntimeBlockSnapshotReplay(t *testing.T) {
 	srv := netserver.NewServer("127.0.0.1:0", 157)
 	srv.TypeIO.BuildingLookup = func(pos int32) protocol.Building {
 		return protocol.BuildingBox{PosValue: pos}
@@ -1284,8 +1283,8 @@ func TestSyncAuthoritativeWorldToConnWithBaseModelStillReplaysRuntimeBlockSnapsh
 			foundBlockSnapshot = true
 		}
 	}
-	if !foundBlockSnapshot {
-		t.Fatal("expected matching-base dynamic sync to replay runtime blockSnapshot state")
+	if foundBlockSnapshot {
+		t.Fatal("expected matching-base dynamic sync to avoid full runtime blockSnapshot replay")
 	}
 }
 
@@ -1360,6 +1359,93 @@ func TestSyncDeferredLiveRuntimeStateToConnAvoidsFullSetTileReplay(t *testing.T)
 	}
 	if !foundTileConfig {
 		t.Fatal("expected deferred live runtime repair to replay runtime tileConfig state")
+	}
+}
+
+func TestSyncPostConnectWorldStateToConnDefersLiveRuntimeRepair(t *testing.T) {
+	srv := netserver.NewServer("127.0.0.1:0", 157)
+	srv.TypeIO.BuildingLookup = func(pos int32) protocol.Building {
+		return protocol.BuildingBox{PosValue: pos}
+	}
+	serverSide, clientSide := net.Pipe()
+	defer serverSide.Close()
+	defer clientSide.Close()
+
+	sendConn := netserver.NewConn(serverSide, srv.Serial)
+	defer sendConn.Close()
+	sendConn.SetLiveWorldStream(true)
+
+	w := world.New(world.Config{TPS: 60})
+	model := world.NewWorldModel(24, 24)
+	model.BlockNames = map[int16]string{
+		600: "sorter",
+	}
+	sorterPos := placeSyncTestBuilding(t, model, 8, 10, 600, 1, 0)
+	w.SetModel(model)
+	w.ConfigureBuildingPacked(sorterPos, int16(4))
+	if !w.HasLiveMapStreamPayloadPacked(sorterPos) {
+		t.Fatal("expected test sorter to be supported by live world-stream payloads")
+	}
+
+	syncPostConnectWorldStateToConn(srv, sendConn, w, nil, "maps/test.msav", config.AuthoritySyncOfficial)
+	if packets := collectRawPacketsUntilTimeout(t, clientSide, 8); len(packets) != 0 {
+		descriptions := make([]string, 0, len(packets))
+		for _, packet := range packets {
+			if len(packet) == 0 {
+				continue
+			}
+			packetID, _ := decodeFramedPacket(t, packet)
+			descriptions = append(descriptions, fmt.Sprintf("packetID=%d", packetID))
+		}
+		t.Fatalf("expected live post-connect path to defer runtime repair packets, got %s", strings.Join(descriptions, ", "))
+	}
+
+	time.Sleep(liveRuntimeRepairDelay(srv) + 100*time.Millisecond)
+	packets := collectRawPacketsUntilTimeout(t, clientSide, 24)
+
+	setTileID, ok := srv.Registry.PacketID(&protocol.Remote_Tile_setTile_140{})
+	if !ok {
+		t.Fatal("resolve setTile packet id")
+	}
+	blockSnapshotID, ok := srv.Registry.PacketID(&protocol.Remote_NetClient_blockSnapshot_34{})
+	if !ok {
+		t.Fatal("resolve blockSnapshot packet id")
+	}
+	buildHealthID, ok := srv.Registry.PacketID(&protocol.Remote_Tile_buildHealthUpdate_144{})
+	if !ok {
+		t.Fatal("resolve buildHealthUpdate packet id")
+	}
+	tileConfigID, ok := srv.Registry.PacketID(&protocol.Remote_InputHandler_tileConfig_90{})
+	if !ok {
+		t.Fatal("resolve tileConfig packet id")
+	}
+
+	foundSetTile := false
+	foundRuntimeRepair := false
+	foundTileConfig := false
+	for _, packet := range packets {
+		if len(packet) == 0 {
+			continue
+		}
+		packetID, _ := decodeFramedPacket(t, packet)
+		if packetID == setTileID {
+			foundSetTile = true
+		}
+		if packetID == blockSnapshotID || packetID == buildHealthID {
+			foundRuntimeRepair = true
+		}
+		if packetID == tileConfigID {
+			foundTileConfig = true
+		}
+	}
+	if foundSetTile {
+		t.Fatal("expected deferred live post-connect repair to avoid full setTile replay")
+	}
+	if !foundRuntimeRepair {
+		t.Fatal("expected deferred live post-connect repair to replay runtime block state")
+	}
+	if !foundTileConfig {
+		t.Fatal("expected deferred live post-connect repair to replay runtime tileConfig state")
 	}
 }
 
@@ -1653,7 +1739,7 @@ func TestBuildBlockSnapshotPacketsIsolatesSnapshots(t *testing.T) {
 	}
 }
 
-func TestSyncWorldDiffToConnWithMatchingBaseStillReplaysRuntimeBlockSnapshots(t *testing.T) {
+func TestSyncWorldDiffToConnWithMatchingBaseAvoidsRuntimeBlockSnapshotReplay(t *testing.T) {
 	srv := netserver.NewServer("127.0.0.1:0", 157)
 	serverSide, clientSide := net.Pipe()
 	defer serverSide.Close()
@@ -1700,8 +1786,8 @@ func TestSyncWorldDiffToConnWithMatchingBaseStillReplaysRuntimeBlockSnapshots(t 
 			foundBlockSnapshot = true
 		}
 	}
-	if !foundBlockSnapshot {
-		t.Fatal("expected unchanged base/live diff sync to replay runtime blockSnapshot state")
+	if foundBlockSnapshot {
+		t.Fatal("expected unchanged base/live diff sync to avoid full runtime blockSnapshot replay")
 	}
 }
 

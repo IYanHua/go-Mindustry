@@ -447,10 +447,12 @@ func decodeRulesWithGamemodeDefaults(data []byte, tags map[string]string, model 
 	}
 
 	var overlay Rules
+	rawFields := map[string]json.RawMessage{}
 	if len(normalizedData) > 0 {
 		if err := json.Unmarshal(normalizedData, &overlay); err != nil {
 			return nil, err
 		}
+		_ = json.Unmarshal(normalizedData, &rawFields)
 	}
 
 	mode := inferGamemodeFromTags(tags)
@@ -468,11 +470,27 @@ func decodeRulesWithGamemodeDefaults(data []byte, tags map[string]string, model 
 		if err := json.Unmarshal(normalizedData, base); err != nil {
 			return nil, err
 		}
+		// Mindustry's Rules JSON stores wave spacing in ticks. Internally this
+		// server keeps wave timers in seconds, then converts back to ticks when
+		// writing NetworkIO/stateSnapshot data.
+		if _, ok := rawFields["waveSpacing"]; ok {
+			base.WaveSpacing = ticksToSeconds(base.WaveSpacing)
+		}
+		if _, ok := rawFields["initialWaveSpacing"]; ok {
+			base.InitialWaveSpacing = ticksToSeconds(base.InitialWaveSpacing)
+		}
 	}
 	if strings.TrimSpace(base.ModeName) == "" {
 		base.ModeName = mode
 	}
 	return base, nil
+}
+
+func ticksToSeconds(v float32) float32 {
+	if v <= 0 {
+		return v
+	}
+	return v / 60
 }
 
 func mapHasMultipleCoreTeams(m *WorldModel) bool {
@@ -596,7 +614,7 @@ func DefaultRules() *Rules {
 		AiCoreSpawn:                 true,  // 原版 team rule 默认允许核心刷 builder/core unit
 
 		// 数值规则
-		WaveSpacing:                 90.0,  // 原版 5400 ticks / 60 = 90秒
+		WaveSpacing:                 120.0, // 原版 7200 ticks / 60 = 120秒
 		InitialWaveSpacing:          0.0,   // 原版 0秒（由初始波次间隔决定）
 		WinWave:                     0,     // 0表示无限波次
 		UnitCap:                     0,     // 0表示由单位防御设置决定

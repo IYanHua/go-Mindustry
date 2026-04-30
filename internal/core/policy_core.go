@@ -24,13 +24,14 @@ type policyWindow struct {
 }
 
 type Core4 struct {
-	name        string
-	messages    chan Message
-	workerCount int
-	wg          sync.WaitGroup
-	running     atomic.Bool
-	stats       *Stats
-	serverCore  atomic.Value // *ServerCore
+	name         string
+	messages     chan Message
+	workerCount  int
+	wg           sync.WaitGroup
+	running      atomic.Bool
+	localWorkers atomic.Bool
+	stats        *Stats
+	serverCore   atomic.Value // *ServerCore
 
 	config PolicyConfig
 
@@ -38,8 +39,7 @@ type Core4 struct {
 	connectionWindows map[string]*policyWindow
 	packetWindows     map[string]*policyWindow
 	activeConnections map[int32]string
-	playerShardByKey  map[string]int
-	coreShardByKey    map[string]int
+	nextPruneAt       time.Time
 
 	remoteMu sync.RWMutex
 	remote   *remoteCore4Client
@@ -76,8 +76,6 @@ func NewCore4(cfg Config) *Core4 {
 		connectionWindows: map[string]*policyWindow{},
 		packetWindows:     map[string]*policyWindow{},
 		activeConnections: map[int32]string{},
-		playerShardByKey:  map[string]int{},
-		coreShardByKey:    map[string]int{},
 	}
 }
 
@@ -110,9 +108,11 @@ func (c4 *Core4) SetPolicyConfig(cfg PolicyConfig) {
 func (c4 *Core4) Start() {
 	if c4.remoteClient() != nil {
 		c4.running.Store(true)
+		c4.localWorkers.Store(false)
 		return
 	}
 	if !c4.running.Swap(true) {
+		c4.localWorkers.Store(true)
 		c4.wg.Add(c4.workerCount)
 		for i := 0; i < c4.workerCount; i++ {
 			go c4.worker()
@@ -138,6 +138,14 @@ func (c4 *Core4) worker() {
 }
 
 func (c4 *Core4) Stop() {
+	if c4.localWorkers.Load() {
+		if c4.running.Swap(false) {
+			close(c4.messages)
+			c4.wg.Wait()
+		}
+		c4.localWorkers.Store(false)
+		return
+	}
 	if c4.remoteClient() != nil {
 		c4.running.Store(false)
 		return
@@ -201,24 +209,34 @@ func (c4 *Core4) queryPolicy(msg *PolicyMessage) (PolicyResult, error) {
 		return PolicyResult{}, errors.New("invalid policy request")
 	}
 	if remote := c4.remoteClient(); remote != nil {
+		var (
+			res PolicyResult
+			err error
+		)
 		switch msg.Action {
 		case "allow_connection":
-			return remote.allowConnection(msg.IP, msg.UUID)
+			res, err = remote.allowConnection(msg.IP, msg.UUID)
 		case "allow_packet":
-			return remote.allowPacket(msg.IP, msg.ConnID, msg.UUID, msg.Packet)
+			res, err = remote.allowPacket(msg.IP, msg.ConnID, msg.UUID, msg.Packet)
 		case "record_open":
-			return PolicyResult{Allowed: true}, remote.recordOpen(msg.ConnID, msg.IP, msg.UUID)
+			err = remote.recordOpen(msg.ConnID, msg.IP, msg.UUID)
+			res = PolicyResult{Allowed: true}
 		case "record_close":
-			return PolicyResult{Allowed: true}, remote.recordClose(msg.ConnID)
+			err = remote.recordClose(msg.ConnID)
+			res = PolicyResult{Allowed: true}
 		case "player_shard":
-			return remote.playerShard(msg.UUID, msg.IP)
+			res, err = remote.playerShard(msg.UUID, msg.IP)
 		case "core_shard":
-			return remote.coreShard(msg.Key)
+			res, err = remote.coreShard(msg.Key)
 		default:
 			return PolicyResult{}, errors.New("unknown policy action")
 		}
+		if err == nil {
+			return res, nil
+		}
+		c4.AttachRemote(nil)
 	}
-	if !c4.running.Load() {
+	if !c4.localWorkers.Load() {
 		return c4.handlePolicyRequest(msg), nil
 	}
 	ch := make(chan PolicyResult, 1)
@@ -265,6 +283,7 @@ func (c4 *Core4) handlePolicyMessage(m *PolicyMessage) {
 func (c4 *Core4) handlePolicyRequest(m *PolicyMessage) PolicyResult {
 	c4.stateMu.Lock()
 	defer c4.stateMu.Unlock()
+	c4.pruneStateLocked(time.Now())
 
 	switch m.Action {
 	case "allow_connection":
@@ -287,6 +306,43 @@ func (c4 *Core4) handlePolicyRequest(m *PolicyMessage) PolicyResult {
 	default:
 		return PolicyResult{Error: errors.New("unknown policy action")}
 	}
+}
+
+func (c4 *Core4) pruneStateLocked(now time.Time) {
+	if c4 == nil {
+		return
+	}
+	if !c4.nextPruneAt.IsZero() && now.Before(c4.nextPruneAt) {
+		return
+	}
+	prunePolicyWindowsLocked(c4.connectionWindows, now)
+	prunePolicyWindowsLocked(c4.packetWindows, now)
+	c4.nextPruneAt = now.Add(c4.policyPruneIntervalLocked())
+}
+
+func prunePolicyWindowsLocked(store map[string]*policyWindow, now time.Time) {
+	for key, entry := range store {
+		if entry == nil || !entry.resetAt.After(now) {
+			delete(store, key)
+		}
+	}
+}
+
+func (c4 *Core4) policyPruneIntervalLocked() time.Duration {
+	interval := c4.config.PacketWindow
+	if interval <= 0 || (c4.config.ConnectionWindow > 0 && c4.config.ConnectionWindow < interval) {
+		interval = c4.config.ConnectionWindow
+	}
+	if interval <= 0 {
+		interval = time.Second
+	}
+	if interval < time.Second {
+		return time.Second
+	}
+	if interval > 10*time.Second {
+		return 10 * time.Second
+	}
+	return interval
 }
 
 func (c4 *Core4) allowWindowLocked(store map[string]*policyWindow, key string, burst int, window time.Duration) bool {
@@ -315,12 +371,7 @@ func normalizePolicyKey(uuid, ip string) string {
 
 func (c4 *Core4) playerShardLocked(uuid, ip string) int {
 	key := normalizePolicyKey(uuid, ip)
-	if shard, ok := c4.playerShardByKey[key]; ok {
-		return shard
-	}
-	shard := shardForKey(key, c4.config.PlayerShards)
-	c4.playerShardByKey[key] = shard
-	return shard
+	return shardForKey(key, c4.config.PlayerShards)
 }
 
 func (c4 *Core4) coreShardLocked(key string) int {
@@ -328,12 +379,7 @@ func (c4 *Core4) coreShardLocked(key string) int {
 	if key == "" {
 		key = "default"
 	}
-	if shard, ok := c4.coreShardByKey[key]; ok {
-		return shard
-	}
-	shard := shardForKey(key, c4.config.CoreShards)
-	c4.coreShardByKey[key] = shard
-	return shard
+	return shardForKey(key, c4.config.CoreShards)
 }
 
 func shardForKey(key string, total int) int {

@@ -21,6 +21,7 @@ type overdriveProjectorProfile struct {
 	SpeedBoostPhase float32
 	PhaseRangeBoost float32
 	UseTime         float32
+	HasBoost        bool
 }
 
 type forceProjectorProfile struct {
@@ -56,14 +57,16 @@ var overdriveProjectorProfiles = map[string]overdriveProjectorProfile{
 		SpeedBoostPhase: 0.75,
 		PhaseRangeBoost: 20,
 		UseTime:         400,
+		HasBoost:        true,
 	},
 	"overdrive-dome": {
 		Range:           200,
 		Reload:          60,
-		SpeedBoost:      2.0,
-		SpeedBoostPhase: 1.0,
-		PhaseRangeBoost: 50,
-		UseTime:         480,
+		SpeedBoost:      2.5,
+		SpeedBoostPhase: 0.75,
+		PhaseRangeBoost: 20,
+		UseTime:         300,
+		HasBoost:        false,
 	},
 }
 
@@ -139,26 +142,6 @@ func (w *World) stepSupportBuildingsLocked(delta time.Duration) {
 		w.stepMendProjectorLocked(pos, tile, prof, state, dt, deltaFrames)
 	}
 
-	// Step overdrive projectors
-	for _, pos := range w.overdriveProjectorPositions {
-		if pos < 0 || int(pos) >= len(w.model.Tiles) {
-			continue
-		}
-		tile := &w.model.Tiles[pos]
-		if tile.Build == nil || tile.Team == 0 || tile.Block == 0 {
-			continue
-		}
-
-		name := w.blockNameByID(int16(tile.Block))
-		prof, ok := overdriveProjectorProfiles[name]
-		if !ok {
-			continue
-		}
-
-		state := w.overdriveProjectorStateLocked(pos)
-		w.stepOverdriveProjectorLocked(pos, tile, prof, state, dt, deltaFrames)
-	}
-
 	// Step force projectors
 	for _, pos := range w.forceProjectorPositions {
 		if pos < 0 || int(pos) >= len(w.model.Tiles) {
@@ -180,10 +163,43 @@ func (w *World) stepSupportBuildingsLocked(delta time.Duration) {
 	}
 }
 
+func (w *World) stepOverdriveProjectorsLocked(delta time.Duration) {
+	if w == nil || w.model == nil {
+		return
+	}
+
+	dt := float32(delta.Seconds())
+	deltaFrames := dt * 60.0
+
+	if dt <= 0 {
+		return
+	}
+
+	for _, pos := range w.overdriveProjectorPositions {
+		if pos < 0 || int(pos) >= len(w.model.Tiles) {
+			continue
+		}
+		tile := &w.model.Tiles[pos]
+		if tile.Build == nil || tile.Team == 0 || tile.Block == 0 {
+			continue
+		}
+
+		name := w.blockNameByID(int16(tile.Block))
+		prof, ok := overdriveProjectorProfiles[name]
+		if !ok {
+			continue
+		}
+
+		state := w.overdriveProjectorStateLocked(pos)
+		w.stepOverdriveProjectorLocked(pos, tile, prof, state, dt, deltaFrames)
+	}
+}
+
 func (w *World) stepMendProjectorLocked(pos int32, tile *Tile, prof mendProjectorProfile, state *mendProjectorState, dt, deltaFrames float32) {
 	if tile == nil || tile.Build == nil || state == nil {
 		return
 	}
+	deltaFrames, _ = w.scaledBuildingDeltaLocked(pos, deltaFrames, dt)
 	canHeal := !w.isBuildingHealSuppressedLocked(tile.Build)
 
 	efficiency := float32(1.0)
@@ -272,6 +288,7 @@ func (w *World) stepOverdriveProjectorLocked(pos int32, tile *Tile, prof overdri
 	if tile == nil || tile.Build == nil || state == nil {
 		return
 	}
+	deltaFrames, _ = w.scaledBuildingDeltaLocked(pos, deltaFrames, dt)
 
 	efficiency := float32(1.0)
 	if tile.Build.Health <= 0 {
@@ -288,8 +305,12 @@ func (w *World) stepOverdriveProjectorLocked(pos int32, tile *Tile, prof overdri
 
 	state.Charge += state.Heat * deltaFrames
 
-	// Phase heat (simplified)
-	state.PhaseHeat = approachf(state.PhaseHeat, 0, 0.1*deltaFrames)
+	// Phase heat is only meaningful on projector variants that still support item boosting.
+	if prof.HasBoost {
+		state.PhaseHeat = approachf(state.PhaseHeat, 0, 0.1*deltaFrames)
+	} else {
+		state.PhaseHeat = 0
+	}
 
 	if state.Charge >= prof.Reload {
 		realRange := prof.Range + state.PhaseHeat*prof.PhaseRangeBoost
@@ -341,6 +362,9 @@ func (w *World) applyBoostToBuildingsLocked(source *Tile, radius, boost, duratio
 			if tile.Build == nil || tile.Build.Team != source.Build.Team {
 				continue
 			}
+			if !vanillaBlockCanOverdrive(w.blockNameByID(int16(tile.Block))) {
+				continue
+			}
 
 			buildX := float32(tileX) * 8
 			buildY := float32(tileY) * 8
@@ -349,8 +373,7 @@ func (w *World) applyBoostToBuildingsLocked(source *Tile, radius, boost, duratio
 			distSq := dx2*dx2 + dy2*dy2
 
 			if distSq < radiusSq {
-				// Apply speed boost (simplified - would need boost tracking in Building)
-				// For now, just mark that building received boost
+				w.applyBuildingBoostLocked(pos, boost, duration)
 			}
 		}
 	}
@@ -360,6 +383,7 @@ func (w *World) stepForceProjectorLocked(pos int32, tile *Tile, prof forceProjec
 	if tile == nil || tile.Build == nil || state == nil {
 		return
 	}
+	deltaFrames, dt = w.scaledBuildingDeltaLocked(pos, deltaFrames, dt)
 
 	efficiency := float32(1.0)
 	if tile.Build.Health <= 0 {

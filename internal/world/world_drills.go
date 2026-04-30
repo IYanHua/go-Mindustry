@@ -2,6 +2,13 @@ package world
 
 import "time"
 
+type drillOreSample struct {
+	item     ItemID
+	count    int
+	hardness int
+	ok       bool
+}
+
 type drillProfile struct {
 	Tier                 int
 	DrillTimeFrames      float32
@@ -19,16 +26,40 @@ var drillProfilesByBlockName = map[string]drillProfile{
 	"blast-drill":      {Tier: 5, DrillTimeFrames: 280, HardnessMul: 50, LiquidBoostIntensity: 1.8, LiquidPerFrame: 0.1, PowerPerSecond: 3.0, WarmupSpeed: 0.01},
 }
 
-func (w *World) stepDrillProduction(delta time.Duration) {
+func (w *World) stepDrillProduction(delta time.Duration) time.Duration {
 	if w == nil || w.model == nil {
-		return
+		return 0
 	}
 	deltaFrames := float32(delta.Seconds() * 60)
 	deltaSeconds := float32(delta.Seconds())
 	if deltaFrames <= 0 || deltaSeconds <= 0 {
-		return
+		return 0
 	}
-	for _, pos := range w.drillTilePositions {
+	samples := make([]drillOreSample, len(w.drillTilePositions))
+	dispatch := w.parallelizeRanges(len(w.drillTilePositions), func(_ int, start, end int) {
+		for i := start; i < end; i++ {
+			pos := w.drillTilePositions[i]
+			if pos < 0 || int(pos) >= len(w.model.Tiles) {
+				continue
+			}
+			tile := &w.model.Tiles[pos]
+			if tile.Build == nil || tile.Build.Team == 0 || tile.Block == 0 {
+				continue
+			}
+			prof, ok := drillProfilesByBlockName[w.blockNameByID(int16(tile.Block))]
+			if !ok {
+				continue
+			}
+			item, count, hardness, ok := w.countDrillOreLocked(tile, prof.Tier)
+			samples[i] = drillOreSample{
+				item:     item,
+				count:    count,
+				hardness: hardness,
+				ok:       ok,
+			}
+		}
+	})
+	for i, pos := range w.drillTilePositions {
 		if pos < 0 || int(pos) >= len(w.model.Tiles) {
 			continue
 		}
@@ -42,20 +73,21 @@ func (w *World) stepDrillProduction(delta time.Duration) {
 			continue
 		}
 		state := w.drillStates[pos]
-		w.stepSingleDrillLocked(pos, tile, name, prof, &state, deltaFrames, deltaSeconds)
+		w.stepSingleDrillLocked(pos, tile, prof, &state, samples[i], deltaFrames, deltaSeconds)
 		w.drillStates[pos] = state
 	}
+	return dispatch.DispatchDuration
 }
 
-func (w *World) stepSingleDrillLocked(pos int32, tile *Tile, name string, prof drillProfile, state *drillRuntimeState, deltaFrames, deltaSeconds float32) {
+func (w *World) stepSingleDrillLocked(pos int32, tile *Tile, prof drillProfile, state *drillRuntimeState, sample drillOreSample, deltaFrames, deltaSeconds float32) {
 	if tile == nil || tile.Build == nil || state == nil {
 		return
 	}
-	dominantItem, dominantCount, hardness, ok := w.countDrillOreLocked(tile, prof.Tier)
+	deltaFrames, deltaSeconds = w.scaledBuildingDeltaLocked(pos, deltaFrames, deltaSeconds)
 	if item, exists := firstBuildingItem(tile.Build); exists {
 		_ = w.dumpSingleItemLocked(pos, tile, &item, nil)
 	}
-	if !ok || dominantCount <= 0 || totalBuildingItems(tile.Build) >= w.itemCapacityForBlockLocked(tile) {
+	if !sample.ok || sample.count <= 0 || totalBuildingItems(tile.Build) >= w.itemCapacityForBlockLocked(tile) {
 		state.Warmup = approachf(state.Warmup, 0, prof.WarmupSpeed*deltaFrames)
 		return
 	}
@@ -68,13 +100,13 @@ func (w *World) stepSingleDrillLocked(pos int32, tile *Tile, name string, prof d
 		return
 	}
 	state.Warmup = approachf(state.Warmup, speed, prof.WarmupSpeed*deltaFrames)
-	delay := prof.DrillTimeFrames + prof.HardnessMul*float32(hardness)
+	delay := prof.DrillTimeFrames + prof.HardnessMul*float32(sample.hardness)
 	if delay <= 0 {
 		return
 	}
-	state.Progress += deltaFrames * float32(dominantCount) * speed * state.Warmup
+	state.Progress += deltaFrames * float32(sample.count) * speed * state.Warmup
 	for state.Progress >= delay {
-		if !w.offloadProducedItemLocked(pos, tile, dominantItem) {
+		if !w.offloadProducedItemLocked(pos, tile, sample.item) {
 			break
 		}
 		state.Progress -= delay

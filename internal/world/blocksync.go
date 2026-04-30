@@ -128,7 +128,7 @@ func (w *World) filterSyncedBuildingsByRouteLocked(positions []int32, itemTurret
 			continue
 		}
 
-		name := strings.ToLower(strings.TrimSpace(w.blockNameByID(int16(tile.Block))))
+		name := w.blockNameByID(int16(tile.Block))
 		kind := w.classifyBlockSyncKindLocked(pos, tile, name)
 		if itemTurretsOnly {
 			if kind != blockSyncItemTurret {
@@ -226,7 +226,7 @@ func (w *World) PeriodicBlockSyncSnapshotsLiveOnly() []BlockSyncSnapshot {
 		if tile == nil || tile.Block == 0 || tile.Build == nil {
 			continue
 		}
-		name := strings.ToLower(strings.TrimSpace(w.blockNameByID(int16(tile.Block))))
+		name := w.blockNameByID(int16(tile.Block))
 		kind := w.classifyBlockSyncKindLocked(pos, tile, name)
 		if isTurretBlockSyncKind(kind) || isHighFrequencyTransportBlockSyncKind(kind) {
 			continue
@@ -343,7 +343,7 @@ func (w *World) TurretBlockSyncSnapshotsLiveOnly() []BlockSyncSnapshot {
 		if tile.Build == nil || tile.Block == 0 || tile.Build.Health <= 0 {
 			continue
 		}
-		name := strings.ToLower(strings.TrimSpace(w.blockNameByID(int16(tile.Block))))
+		name := w.blockNameByID(int16(tile.Block))
 		if w.classifyBlockSyncKindLocked(pos, tile, name) == blockSyncItemTurret {
 			continue
 		}
@@ -362,7 +362,7 @@ func (w *World) unitFactoryBlockSyncSnapshotsLocked(allowInlineFallback bool) []
 		if tile == nil || tile.Block == 0 || tile.Build == nil {
 			continue
 		}
-		if classifyBlockSyncKind(strings.ToLower(strings.TrimSpace(w.blockNameByID(int16(tile.Block))))) != blockSyncUnitFactory {
+		if classifyBlockSyncKind(w.blockNameByID(int16(tile.Block))) != blockSyncUnitFactory {
 			continue
 		}
 		positions = append(positions, pos)
@@ -398,7 +398,7 @@ func (w *World) payloadProcessorBlockSyncSnapshotsLocked(allowInlineFallback boo
 		if tile == nil || tile.Block == 0 || tile.Build == nil {
 			continue
 		}
-		if !isPayloadProcessorBlockSyncKind(classifyBlockSyncKind(strings.ToLower(strings.TrimSpace(w.blockNameByID(int16(tile.Block)))))) {
+		if !isPayloadProcessorBlockSyncKind(classifyBlockSyncKind(w.blockNameByID(int16(tile.Block)))) {
 			continue
 		}
 		positions = append(positions, pos)
@@ -460,7 +460,7 @@ func (w *World) RelatedBlockSyncPackedPositions(packedPos int32) []int32 {
 		out = append(out, packed)
 	}
 
-	name := strings.ToLower(strings.TrimSpace(w.blockNameByID(int16(tile.Block))))
+	name := w.blockNameByID(int16(tile.Block))
 	if w.classifyBlockSyncKindLocked(pos, tile, name) == blockSyncNone {
 		return nil
 	}
@@ -499,7 +499,7 @@ func (w *World) blockSyncSnapshotsForTilePositionsLocked(tilePositions []int32, 
 		if tile == nil || !isCenterBuildingTile(tile) {
 			continue
 		}
-		name := strings.ToLower(strings.TrimSpace(w.blockNameByID(int16(tile.Block))))
+		name := w.blockNameByID(int16(tile.Block))
 		kind := w.classifyBlockSyncKindLocked(pos, tile, name)
 		if kind == blockSyncNone {
 			continue
@@ -542,7 +542,6 @@ func (w *World) blockSyncSnapshotsForTilePositionsLocked(tilePositions []int32, 
 }
 
 func classifyBlockSyncKind(name string) blockSyncKind {
-	name = strings.ToLower(strings.TrimSpace(name))
 	switch name {
 	case "battery", "battery-large",
 		"unit-repair-tower",
@@ -1256,7 +1255,7 @@ func (w *World) writeBlockItemTurretAmmoLocked(writer *protocol.Writer, tile *Ti
 			x, y = tile.X, tile.Y
 			tileTeam = tile.Team
 			if tile.Build != nil {
-				name = strings.ToLower(strings.TrimSpace(w.blockNameByID(int16(tile.Build.Block))))
+				name = w.blockNameByID(int16(tile.Build.Block))
 				buildTeam = tile.Build.Team
 			}
 		}

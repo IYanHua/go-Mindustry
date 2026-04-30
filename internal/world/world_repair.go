@@ -87,6 +87,7 @@ func (w *World) stepSingleRepairTurretLocked(pos int32, tile *Tile, prof repairT
 	if tile == nil || tile.Build == nil || state == nil {
 		return
 	}
+	deltaFrames, deltaSeconds = w.scaledBuildingDeltaLocked(pos, deltaFrames, deltaSeconds)
 	targetIdx, hasTarget := findEntityIndexByID(w.model.Entities, nil, state.TargetID)
 	if hasTarget {
 		target := &w.model.Entities[targetIdx]
@@ -152,6 +153,7 @@ func (w *World) stepSingleRepairTowerLocked(pos int32, tile *Tile, prof repairTo
 	if tile == nil || tile.Build == nil || state == nil {
 		return
 	}
+	deltaFrames, deltaSeconds = w.scaledBuildingDeltaLocked(pos, deltaFrames, deltaSeconds)
 	state.Refresh += deltaFrames
 	if state.Refresh >= 6 {
 		state.Refresh = float32mod(state.Refresh, 6)

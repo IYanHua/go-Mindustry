@@ -12,6 +12,18 @@ import (
 
 type UnitProfile struct {
 	Name                     string               `json:"name"`
+	Constructor              string               `json:"constructor,omitempty"`
+	EntityComponents         []string             `json:"entity_components,omitempty"`
+	MovementClass            string               `json:"movement_class,omitempty"`
+	Naval                    bool                 `json:"naval,omitempty"`
+	Legged                   bool                 `json:"legged,omitempty"`
+	Tank                     bool                 `json:"tank,omitempty"`
+	Hover                    bool                 `json:"hover,omitempty"`
+	Crawl                    bool                 `json:"crawl,omitempty"`
+	PayloadUnit              bool                 `json:"payload_unit,omitempty"`
+	TimedKill                bool                 `json:"timed_kill,omitempty"`
+	BlockUnit                bool                 `json:"block_unit,omitempty"`
+	BuildingTether           bool                 `json:"building_tether,omitempty"`
 	Health                   float32              `json:"health"`
 	Armor                    float32              `json:"armor"`
 	Speed                    float32              `json:"speed"`
@@ -277,6 +289,8 @@ var (
 	reUnitDecl   = regexp.MustCompile(`(?m)(\w+)\s*=\s*new\s+([A-Za-z0-9_$.]*UnitType)\("([^"]+)"\)\s*\{\{`)
 	reBlockDecl  = regexp.MustCompile(`(?m)(\w+)\s*=\s*new\s+[A-Za-z0-9_$.]+\("([^"]+)"\)\s*\{\{`)
 	reTurretDecl = regexp.MustCompile(`(?m)(\w+)\s*=\s*new\s+([A-Za-z0-9_$.]+)\("([^"]+)"\)\s*\{\{`)
+	reEntityDef  = regexp.MustCompile(`(?s)@EntityDef\s*\((.*?)\)\s*UnitType\s+([^;]+);`)
+	reClassRef   = regexp.MustCompile(`([A-Za-z0-9_]+)\.class`)
 
 	reRange                 = regexp.MustCompile(`(?m)\brange\s*=\s*([^;]+);`)
 	reMaxRange              = regexp.MustCompile(`(?m)\bmaxRange\s*=\s*([^;]+);`)
@@ -429,6 +443,7 @@ func parseRequirements(body string, items map[string]itemMeta) []BlockRequiremen
 
 func extractUnits(src string, statusLookup map[string]statusLookupEntry) ([]UnitProfile, error) {
 	matches := reUnitDecl.FindAllStringSubmatchIndex(src, -1)
+	entityDefs := extractUnitEntityDefs(src)
 	unitNamesByVar := make(map[string]string, len(matches))
 	for _, m := range matches {
 		if len(m) < 8 {
@@ -442,6 +457,7 @@ func extractUnits(src string, statusLookup map[string]statusLookupEntry) ([]Unit
 	}
 	out := make([]UnitProfile, 0, len(matches))
 	for _, m := range matches {
+		varName := strings.TrimSpace(src[m[2]:m[3]])
 		ctorType := strings.TrimSpace(src[m[4]:m[5]])
 		name := src[m[6]:m[7]]
 		bodyStart := m[1]
@@ -458,7 +474,20 @@ func extractUnits(src string, statusLookup map[string]statusLookupEntry) ([]Unit
 		if err != nil {
 			return nil, fmt.Errorf("extract unit %s: %w", strings.ToLower(strings.TrimSpace(name)), err)
 		}
+		entityDef := entityDefs[varName]
 		out = append(out, UnitProfile{
+			Constructor:              simpleAbilityClassName(ctorType),
+			EntityComponents:         append([]string(nil), entityDef.components...),
+			MovementClass:            entityDef.movementClass,
+			Naval:                    entityDef.naval,
+			Legged:                   entityDef.legged,
+			Tank:                     entityDef.tank,
+			Hover:                    entityDef.hover,
+			Crawl:                    entityDef.crawl,
+			PayloadUnit:              entityDef.payloadUnit,
+			TimedKill:                entityDef.timedKill,
+			BlockUnit:                entityDef.blockUnit,
+			BuildingTether:           entityDef.buildingTether,
 			Health:                   meta.health,
 			Armor:                    meta.armor,
 			Speed:                    meta.speed,
@@ -530,6 +559,93 @@ func extractUnits(src string, statusLookup map[string]statusLookupEntry) ([]Unit
 		})
 	}
 	return out, nil
+}
+
+type unitEntityDefProfile struct {
+	components     []string
+	movementClass  string
+	naval          bool
+	legged         bool
+	tank           bool
+	hover          bool
+	crawl          bool
+	payloadUnit    bool
+	timedKill      bool
+	blockUnit      bool
+	buildingTether bool
+}
+
+func extractUnitEntityDefs(src string) map[string]unitEntityDefProfile {
+	out := map[string]unitEntityDefProfile{}
+	for _, match := range reEntityDef.FindAllStringSubmatch(src, -1) {
+		if len(match) < 3 {
+			continue
+		}
+		def := buildUnitEntityDefProfile(match[1])
+		for _, rawName := range strings.Split(match[2], ",") {
+			name := strings.TrimSpace(rawName)
+			if name == "" {
+				continue
+			}
+			out[name] = def
+		}
+	}
+	return out
+}
+
+func buildUnitEntityDefProfile(annotation string) unitEntityDefProfile {
+	seen := map[string]struct{}{}
+	def := unitEntityDefProfile{}
+	for _, m := range reClassRef.FindAllStringSubmatch(annotation, -1) {
+		if len(m) < 2 {
+			continue
+		}
+		name := strings.TrimSpace(m[1])
+		if name == "" {
+			continue
+		}
+		if _, ok := seen[name]; ok {
+			continue
+		}
+		seen[name] = struct{}{}
+		def.components = append(def.components, name)
+	}
+	has := func(name string) bool {
+		_, ok := seen[name]
+		return ok
+	}
+	def.naval = has("WaterMovec")
+	def.legged = has("Legsc")
+	def.tank = has("Tankc")
+	def.hover = has("ElevationMovec")
+	def.crawl = has("Crawlc")
+	def.payloadUnit = has("Payloadc")
+	def.timedKill = has("TimedKillc")
+	def.blockUnit = has("BlockUnitc")
+	def.buildingTether = has("BuildingTetherc")
+	switch {
+	case def.naval:
+		def.movementClass = "naval"
+	case def.legged:
+		def.movementClass = "legs"
+	case def.tank:
+		def.movementClass = "tank"
+	case def.hover:
+		def.movementClass = "hover"
+	case def.crawl:
+		def.movementClass = "crawl"
+	case def.timedKill:
+		def.movementClass = "missile"
+	case def.blockUnit:
+		def.movementClass = "block"
+	case def.buildingTether:
+		def.movementClass = "tether"
+	case has("Mechc"):
+		def.movementClass = "mech"
+	case has("Unitc"):
+		def.movementClass = "air"
+	}
+	return def
 }
 
 func parseWeaponsProfile(body string, statusLookup map[string]statusLookupEntry) parsedProfile {

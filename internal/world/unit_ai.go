@@ -10,6 +10,7 @@ type unitAIKind string
 
 const (
 	unitAIGround       unitAIKind = "ground"
+	unitAINaval        unitAIKind = "naval"
 	unitAIFlying       unitAIKind = "flying"
 	unitAIFlyingFollow unitAIKind = "flying-follow"
 	unitAIDefender     unitAIKind = "defender"
@@ -33,6 +34,11 @@ const (
 	builderAIBreakCheckSec     = float32(40.0 / 60.0)
 	builderAIRebuildPeriodSec  = float32(2)
 	builderAIBuildAIRebuildSec = float32(10.0 / 60.0)
+
+	autonomousAITargetRescanSec   = float32(0.35)
+	autonomousAIEntityRescanSec   = float32(0.20)
+	autonomousAIDefenderRescanSec = float32(0.25)
+	autonomousAINoTargetRescanSec = float32(0.25)
 )
 
 type unitAIState struct {
@@ -45,6 +51,12 @@ type unitAIState struct {
 	StuckX     float32
 	StuckY     float32
 	StuckTime  float32
+
+	CachedTarget         unitAITarget
+	CachedTargetValid    bool
+	CachedTargetKind     unitAIKind
+	CachedTargetTeam     TeamID
+	CachedTargetRescanCD float32
 
 	BuilderFollowingID     int32
 	BuilderAssistFollowing int32
@@ -80,9 +92,16 @@ type builderAIProfile struct {
 	RebuildPeriodSec float32
 }
 
+type groundPathNode struct {
+	pos int32
+	g   int32
+	f   int32
+}
+
 type unitAITarget struct {
 	EntityID int32
 	BuildPos int32
+	HasBuild bool
 	X        float32
 	Y        float32
 	Radius   float32
@@ -107,16 +126,31 @@ func defaultUnitAIKindByName(name string, prof unitRuntimeProfile) unitAIKind {
 	case "assemblydrone":
 		return unitAIAssembler
 	}
-	if strings.Contains(name, "missile") {
+	if prof.Naval || prof.MovementClass == "naval" || isNavalUnitName(name) {
+		return unitAINaval
+	}
+	if prof.TimedKill || prof.MovementClass == "missile" || strings.Contains(name, "missile") {
 		return unitAIMissile
 	}
 	if prof.Flying {
 		return unitAIFlying
 	}
+	if prof.Hover || prof.MovementClass == "hover" {
+		return unitAIFlying
+	}
 	return unitAIGround
 }
 
-func (w *World) unitAIKindForEntityLocked(e RawEntity) unitAIKind {
+func isNavalUnitName(name string) bool {
+	switch normalizeUnitName(name) {
+	case "risso", "minke", "bryde", "sei", "omura", "retusa", "oxynoe", "cyerce", "aegires", "navanax":
+		return true
+	default:
+		return false
+	}
+}
+
+func (w *World) unitNameForEntityLocked(e RawEntity) string {
 	name := ""
 	if w.unitNamesByID != nil {
 		name = w.unitNamesByID[e.TypeID]
@@ -124,11 +158,19 @@ func (w *World) unitAIKindForEntityLocked(e RawEntity) unitAIKind {
 	if strings.TrimSpace(name) == "" {
 		name = fallbackUnitNameByTypeID(e.TypeID)
 	}
+	return normalizeUnitName(name)
+}
+
+func (w *World) unitAIKindForEntityLocked(e RawEntity) unitAIKind {
+	name := w.unitNameForEntityLocked(e)
 	prof, _ := w.unitRuntimeProfileForEntityLocked(e)
 	kind := defaultUnitAIKindByName(name, prof)
 	if kind == "" {
 		if isEntityFlying(e) {
 			return unitAIFlying
+		}
+		if prof.Naval || prof.MovementClass == "naval" || isNavalUnitName(name) {
+			return unitAINaval
 		}
 		return unitAIGround
 	}
@@ -176,19 +218,23 @@ func (w *World) stepEntityAutonomousAILocked(e *RawEntity, dt float32, spatial *
 		if isEntityFlying(*e) {
 			kind = unitAIFlying
 		} else {
-			kind = unitAIGround
+			prof, _ := w.unitRuntimeProfileForEntityLocked(*e)
+			if prof.Naval || prof.MovementClass == "naval" || isNavalUnitName(w.unitNameForEntityLocked(*e)) {
+				kind = unitAINaval
+			} else {
+				kind = unitAIGround
+			}
 		}
 	}
 
-	target, ok := w.selectUnitAITargetLocked(*e, kind, spatial, teamSpatial)
+	target, ok := w.acquireUnitAITargetLocked(*e, kind, dt, spatial, teamSpatial)
 	if !ok {
 		e.VelX, e.VelY = 0, 0
-		delete(w.unitAIStates, e.ID)
 		return
 	}
 
 	switch kind {
-	case unitAIFlying:
+	case unitAIFlying, unitAINaval:
 		w.applyFlyingAIMovementLocked(e, target, speed)
 	case unitAIFlyingFollow:
 		w.applyFlyingFollowAIMovementLocked(e, target, speed)
@@ -216,6 +262,9 @@ func (w *World) builderAIFallbackKindLocked(e RawEntity) (unitAIKind, bool) {
 	if rules.Waves && w.isWaveTeamLocked(e.Team) && !rules.RtsAi {
 		if isEntityFlying(e) {
 			return unitAIFlying, true
+		}
+		if prof, ok := w.unitRuntimeProfileForEntityLocked(e); ok && (prof.Naval || prof.MovementClass == "naval") {
+			return unitAINaval, true
 		}
 		return unitAIGround, true
 	}
@@ -292,7 +341,7 @@ func (w *World) builderPrimaryPlanLocked(owner int32, team TeamID) (unitAITarget
 	if useBreak {
 		tile := &w.model.Tiles[bestBreakPos]
 		tx, ty := tileCenterWorld(tile.X, tile.Y)
-		return unitAITarget{BuildPos: bestBreakPos, X: tx, Y: ty, Radius: 4}, true
+		return unitAITarget{BuildPos: bestBreakPos, HasBuild: true, X: tx, Y: ty, Radius: 4}, true
 	}
 	if bestBuildPos < 0 {
 		return unitAITarget{}, false
@@ -300,7 +349,7 @@ func (w *World) builderPrimaryPlanLocked(owner int32, team TeamID) (unitAITarget
 	x := int(bestBuildPos % int32(w.model.Width))
 	y := int(bestBuildPos / int32(w.model.Width))
 	tx, ty := tileCenterWorld(x, y)
-	return unitAITarget{BuildPos: bestBuildPos, X: tx, Y: ty, Radius: 4}, true
+	return unitAITarget{BuildPos: bestBuildPos, HasBuild: true, X: tx, Y: ty, Radius: 4}, true
 }
 
 func (w *World) builderAIProfileLocked(e RawEntity) builderAIProfile {
@@ -429,6 +478,7 @@ func (w *World) builderPlanTargetLocked(plan entityBuildPlan) (unitAITarget, boo
 	tx, ty := tileCenterWorld(x, y)
 	return unitAITarget{
 		BuildPos: int32(y*w.model.Width + x),
+		HasBuild: true,
 		X:        tx,
 		Y:        ty,
 		Radius:   4,
@@ -783,6 +833,183 @@ func (w *World) acquireNextBuildAIPlanLocked(team TeamID, profile builderAIProfi
 	return BuildPlanOp{}, false
 }
 
+func (w *World) acquireUnitAITargetLocked(src RawEntity, kind unitAIKind, dt float32, spatial *entitySpatialIndex, teamSpatial map[TeamID]*entitySpatialIndex) (unitAITarget, bool) {
+	if w == nil || w.model == nil || src.ID == 0 || src.Team == 0 {
+		return unitAITarget{}, false
+	}
+	state := w.unitAIStates[src.ID]
+	if state.CachedTargetValid && (state.CachedTargetKind != kind || state.CachedTargetTeam != src.Team) {
+		state.CachedTarget = unitAITarget{}
+		state.CachedTargetValid = false
+		state.CachedTargetRescanCD = 0
+		resetUnitAIPathState(&state)
+	}
+	if state.CachedTargetRescanCD > 0 {
+		state.CachedTargetRescanCD -= dt
+		if state.CachedTargetRescanCD < 0 {
+			state.CachedTargetRescanCD = 0
+		}
+	}
+
+	cached := unitAITarget{}
+	cachedOK := false
+	if state.CachedTargetValid {
+		if target, ok := w.refreshCachedUnitAITargetLocked(src, kind, state.CachedTarget); ok {
+			cached = target
+			cachedOK = true
+			state.CachedTarget = target
+			if state.CachedTargetRescanCD > 0 {
+				w.unitAIStates[src.ID] = state
+				return target, true
+			}
+		} else {
+			state.CachedTarget = unitAITarget{}
+			state.CachedTargetValid = false
+			state.CachedTargetRescanCD = 0
+			resetUnitAIPathState(&state)
+		}
+	}
+	if state.CachedTargetRescanCD > 0 {
+		w.unitAIStates[src.ID] = state
+		return unitAITarget{}, false
+	}
+
+	target, ok := w.selectUnitAITargetLocked(src, kind, spatial, teamSpatial)
+	if !ok {
+		if cachedOK {
+			state.CachedTarget = cached
+			state.CachedTargetValid = true
+			state.CachedTargetKind = kind
+			state.CachedTargetTeam = src.Team
+			state.CachedTargetRescanCD = unitAITargetRescanDelay(kind, cached)
+			w.unitAIStates[src.ID] = state
+			return cached, true
+		}
+		state.CachedTarget = unitAITarget{}
+		state.CachedTargetValid = false
+		state.CachedTargetKind = kind
+		state.CachedTargetTeam = src.Team
+		state.CachedTargetRescanCD = autonomousAINoTargetRescanSec
+		resetUnitAIPathState(&state)
+		w.unitAIStates[src.ID] = state
+		return unitAITarget{}, false
+	}
+
+	if !sameUnitAITarget(state.CachedTarget, target) {
+		resetUnitAIPathState(&state)
+	}
+	state.CachedTarget = target
+	state.CachedTargetValid = true
+	state.CachedTargetKind = kind
+	state.CachedTargetTeam = src.Team
+	state.CachedTargetRescanCD = unitAITargetRescanDelay(kind, target)
+	w.unitAIStates[src.ID] = state
+	return target, true
+}
+
+func unitAITargetRescanDelay(kind unitAIKind, target unitAITarget) float32 {
+	if kind == unitAIDefender {
+		return autonomousAIDefenderRescanSec
+	}
+	if target.EntityID != 0 {
+		return autonomousAIEntityRescanSec
+	}
+	return autonomousAITargetRescanSec
+}
+
+func resetUnitAIPathState(state *unitAIState) {
+	if state == nil {
+		return
+	}
+	state.WaypointX = 0
+	state.WaypointY = 0
+	state.GoalX = 0
+	state.GoalY = 0
+	state.GoalRadius = 0
+	state.RepathCD = 0
+	state.StuckX = 0
+	state.StuckY = 0
+	state.StuckTime = 0
+}
+
+func sameUnitAITarget(a, b unitAITarget) bool {
+	if a.EntityID != 0 || b.EntityID != 0 {
+		return a.EntityID != 0 && a.EntityID == b.EntityID
+	}
+	if a.HasBuild || b.HasBuild {
+		return a.HasBuild && b.HasBuild && a.BuildPos == b.BuildPos
+	}
+	return math.Abs(float64(a.X-b.X)) <= 4 && math.Abs(float64(a.Y-b.Y)) <= 4
+}
+
+func (w *World) refreshCachedUnitAITargetLocked(src RawEntity, kind unitAIKind, target unitAITarget) (unitAITarget, bool) {
+	if w == nil || w.model == nil || src.Team == 0 {
+		return unitAITarget{}, false
+	}
+	if target.EntityID != 0 {
+		entity, ok := w.entityByIDLocked(target.EntityID)
+		if !ok || entity.ID == src.ID || entity.Health <= 0 || entity.Team == 0 || entity.Team == src.Team {
+			return unitAITarget{}, false
+		}
+		if kind == unitAIDefender && entity.PlayerID == 0 {
+			return unitAITarget{}, false
+		}
+		if kind != unitAIDefender {
+			allowAir, allowGround := entityAITargetFlags(src)
+			if !canTargetEntity(entity, allowAir, allowGround) {
+				return unitAITarget{}, false
+			}
+		}
+		rangeLimit := w.maxWorldSeekRangeLocked()
+		if kind == unitAIDefender {
+			rangeLimit = maxf(src.AttackRange, 400)
+		}
+		dx := entity.X - src.X
+		dy := entity.Y - src.Y
+		if rangeLimit > 0 && dx*dx+dy*dy > rangeLimit*rangeLimit {
+			return unitAITarget{}, false
+		}
+		target.X = entity.X
+		target.Y = entity.Y
+		target.Radius = maxf(entity.HitRadius*0.5, 4)
+		target.HasBuild = false
+		target.BuildPos = 0
+		target.IsCore = false
+		return target, true
+	}
+	if !target.HasBuild {
+		return unitAITarget{}, false
+	}
+	pos := target.BuildPos
+	if pos < 0 || int(pos) >= len(w.model.Tiles) {
+		return unitAITarget{}, false
+	}
+	tile := &w.model.Tiles[pos]
+	if tile.Block == 0 || tile.Build == nil || tile.Build.Health <= 0 {
+		return unitAITarget{}, false
+	}
+	team := tile.Build.Team
+	if team == 0 {
+		team = tile.Team
+	}
+	name := w.blockNameByID(int16(tile.Block))
+	isCore := isCoreBlockName(name)
+	if kind == unitAIDefender && team == src.Team {
+		if !isCore {
+			return unitAITarget{}, false
+		}
+	} else if team == 0 || team == src.Team {
+		return unitAITarget{}, false
+	}
+	size := w.blockSizeForTileLocked(tile)
+	target.X = float32(tile.X*8 + 4)
+	target.Y = float32(tile.Y*8 + 4)
+	target.Radius = float32(size) * 4
+	target.HasBuild = true
+	target.IsCore = isCore
+	return target, true
+}
+
 func (w *World) selectUnitAITargetLocked(src RawEntity, kind unitAIKind, spatial *entitySpatialIndex, teamSpatial map[TeamID]*entitySpatialIndex) (unitAITarget, bool) {
 	if w == nil || w.model == nil || src.Team == 0 {
 		return unitAITarget{}, false
@@ -793,7 +1020,7 @@ func (w *World) selectUnitAITargetLocked(src RawEntity, kind unitAIKind, spatial
 		if target, ok := w.selectDefenderTargetLocked(src, spatial, teamSpatial); ok {
 			return target, true
 		}
-	case unitAISuicide, unitAIHug, unitAIGround, unitAIFlying, unitAIFlyingFollow, unitAIMissile:
+	case unitAISuicide, unitAIHug, unitAIGround, unitAINaval, unitAIFlying, unitAIFlyingFollow, unitAIMissile:
 	}
 
 	allowAir, allowGround := entityAITargetFlags(src)
@@ -923,6 +1150,7 @@ func (w *World) findAutonomousEnemyBuildingLocked(src RawEntity, rangeLimit floa
 	size := w.blockSizeForTileLocked(tile)
 	return unitAITarget{
 		BuildPos: pos,
+		HasBuild: true,
 		X:        tx,
 		Y:        ty,
 		Radius:   float32(size) * 4,
@@ -965,6 +1193,7 @@ func (w *World) findNearestEnemyCoreLocked(src RawEntity) (unitAITarget, bool) {
 	}
 	return unitAITarget{
 		BuildPos: bestPos,
+		HasBuild: true,
 		X:        bestX,
 		Y:        bestY,
 		Radius:   bestRadius,
@@ -1002,6 +1231,7 @@ func (w *World) findNearestFriendlyCoreLocked(src RawEntity) (unitAITarget, bool
 	}
 	return unitAITarget{
 		BuildPos: bestPos,
+		HasBuild: true,
 		X:        bestX,
 		Y:        bestY,
 		Radius:   bestRadius,
@@ -1062,7 +1292,9 @@ func (w *World) applyGroundAIMovementLocked(e *RawEntity, target unitAITarget, s
 	if reachedTarget(e.X, e.Y, target.X, target.Y, stopRadius) {
 		e.VelX, e.VelY = 0, 0
 		e.Rotation = lookAt(e.X, e.Y, target.X, target.Y)
-		delete(w.unitAIStates, e.ID)
+		state := w.unitAIStates[e.ID]
+		resetUnitAIPathState(&state)
+		w.unitAIStates[e.ID] = state
 		return
 	}
 	wx, wy, ok := w.nextGroundWaypointLocked(*e, target, stopRadius, dt, false)
@@ -1171,7 +1403,7 @@ func (w *World) selectFlyingFollowLeaderLocked(src RawEntity) (unitAITarget, boo
 
 func (w *World) groundAIStopRadiusLocked(src RawEntity, target unitAITarget) float32 {
 	stopRadius := maxf(src.AttackRange*0.75, 12)
-	if target.BuildPos != 0 || target.IsCore {
+	if target.HasBuild || target.IsCore {
 		stopRadius = maxf(stopRadius, target.Radius+4)
 	}
 	return stopRadius
@@ -1248,26 +1480,35 @@ func (w *World) findGroundWaypointLocked(fromX, fromY, toX, toY, goalRadius floa
 	if reachedTarget(fromX, fromY, toX, toY, goalRadius) {
 		return toX, toY, true
 	}
+	goalX := int(clampf(float32(int(toX/8)), 0, float32(w.model.Width-1)))
+	goalY := int(clampf(float32(int(toY/8)), 0, float32(w.model.Height-1)))
+	goalRadiusTiles := int(math.Ceil(float64(goalRadius / 8)))
 
-	prev := make([]int32, len(w.model.Tiles))
-	for i := range prev {
-		prev[i] = -2
-	}
-	queue := make([]int32, 0, 64)
-	queue = append(queue, start)
+	prev, cost, seen, closed, visitID, heap := w.groundPathScratchLocked()
 	prev[start] = -1
+	cost[start] = 0
+	seen[start] = visitID
+	heap = groundPathHeapPush(heap, groundPathNode{
+		pos: start,
+		g:   0,
+		f:   groundPathHeuristic(startX, startY, goalX, goalY, goalRadiusTiles),
+	})
 
 	found := int32(-1)
-	head := 0
-	dirs := [][2]int{{1, 0}, {-1, 0}, {0, 1}, {0, -1}}
-	for head < len(queue) {
-		cur := queue[head]
-		head++
-		cx := int(cur % int32(w.model.Width))
-		cy := int(cur / int32(w.model.Width))
+	dirs := [4][2]int{{1, 0}, {-1, 0}, {0, 1}, {0, -1}}
+	for len(heap) > 0 {
+		var cur groundPathNode
+		cur, heap = groundPathHeapPop(heap)
+		if seen[cur.pos] != visitID || cost[cur.pos] != cur.g || closed[cur.pos] == visitID {
+			continue
+		}
+		closed[cur.pos] = visitID
+		pos := cur.pos
+		cx := int(pos % int32(w.model.Width))
+		cy := int(pos / int32(w.model.Width))
 		wx, wy := tileCenterWorld(cx, cy)
-		if (cur == start || !w.groundCellBlockedLocked(cx, cy)) && reachedTarget(wx, wy, toX, toY, goalRadius) {
-			found = cur
+		if (pos == start || !w.groundCellBlockedLocked(cx, cy)) && reachedTarget(wx, wy, toX, toY, goalRadius) {
+			found = pos
 			break
 		}
 		for _, dir := range dirs {
@@ -1277,16 +1518,24 @@ func (w *World) findGroundWaypointLocked(fromX, fromY, toX, toY, goalRadius floa
 				continue
 			}
 			next := int32(ny*w.model.Width + nx)
-			if prev[next] != -2 {
+			if closed[next] == visitID || (next != start && w.groundCellBlockedLocked(nx, ny)) {
 				continue
 			}
-			if next != start && w.groundCellBlockedLocked(nx, ny) {
+			nextCost := cur.g + 1
+			if seen[next] == visitID && nextCost >= cost[next] {
 				continue
 			}
-			prev[next] = cur
-			queue = append(queue, next)
+			seen[next] = visitID
+			cost[next] = nextCost
+			prev[next] = pos
+			heap = groundPathHeapPush(heap, groundPathNode{
+				pos: next,
+				g:   nextCost,
+				f:   nextCost + groundPathHeuristic(nx, ny, goalX, goalY, goalRadiusTiles),
+			})
 		}
 	}
+	w.groundPathHeap = heap[:0]
 	if found < 0 {
 		return 0, 0, false
 	}
@@ -1302,6 +1551,106 @@ func (w *World) findGroundWaypointLocked(fromX, fromY, toX, toY, goalRadius floa
 	y := int(step / int32(w.model.Width))
 	wx, wy := tileCenterWorld(x, y)
 	return wx, wy, true
+}
+
+func groundPathHeuristic(x, y, goalX, goalY, goalRadiusTiles int) int32 {
+	dx := abs(x - goalX)
+	dy := abs(y - goalY)
+	dist := dx + dy - goalRadiusTiles
+	if dist < 0 {
+		return 0
+	}
+	return int32(dist)
+}
+
+func (w *World) groundPathScratchLocked() ([]int32, []int32, []uint32, []uint32, uint32, []groundPathNode) {
+	if w == nil || w.model == nil {
+		return nil, nil, nil, nil, 0, nil
+	}
+	size := len(w.model.Tiles)
+	if cap(w.groundPathPrev) < size {
+		w.groundPathPrev = make([]int32, size)
+	} else {
+		w.groundPathPrev = w.groundPathPrev[:size]
+	}
+	if cap(w.groundPathCost) < size {
+		w.groundPathCost = make([]int32, size)
+	} else {
+		w.groundPathCost = w.groundPathCost[:size]
+	}
+	if cap(w.groundPathSeen) < size {
+		w.groundPathSeen = make([]uint32, size)
+	} else {
+		w.groundPathSeen = w.groundPathSeen[:size]
+	}
+	if cap(w.groundPathClosed) < size {
+		w.groundPathClosed = make([]uint32, size)
+	} else {
+		w.groundPathClosed = w.groundPathClosed[:size]
+	}
+	if w.groundPathVisitID == 0 {
+		clear(w.groundPathSeen)
+		clear(w.groundPathClosed)
+		w.groundPathVisitID = 1
+	}
+	visitID := w.groundPathVisitID
+	w.groundPathVisitID++
+	if w.groundPathVisitID == 0 {
+		clear(w.groundPathSeen)
+		clear(w.groundPathClosed)
+		w.groundPathVisitID = 1
+	}
+	heap := w.groundPathHeap[:0]
+	return w.groundPathPrev, w.groundPathCost, w.groundPathSeen, w.groundPathClosed, visitID, heap
+}
+
+func groundPathHeapPush(heap []groundPathNode, node groundPathNode) []groundPathNode {
+	heap = append(heap, node)
+	i := len(heap) - 1
+	for i > 0 {
+		parent := (i - 1) / 2
+		if !groundPathNodeLess(heap[i], heap[parent]) {
+			break
+		}
+		heap[i], heap[parent] = heap[parent], heap[i]
+		i = parent
+	}
+	return heap
+}
+
+func groundPathHeapPop(heap []groundPathNode) (groundPathNode, []groundPathNode) {
+	last := len(heap) - 1
+	node := heap[0]
+	heap[0] = heap[last]
+	heap = heap[:last]
+	i := 0
+	for {
+		left := i*2 + 1
+		right := left + 1
+		smallest := i
+		if left < len(heap) && groundPathNodeLess(heap[left], heap[smallest]) {
+			smallest = left
+		}
+		if right < len(heap) && groundPathNodeLess(heap[right], heap[smallest]) {
+			smallest = right
+		}
+		if smallest == i {
+			break
+		}
+		heap[i], heap[smallest] = heap[smallest], heap[i]
+		i = smallest
+	}
+	return node, heap
+}
+
+func groundPathNodeLess(a, b groundPathNode) bool {
+	if a.f != b.f {
+		return a.f < b.f
+	}
+	if a.g != b.g {
+		return a.g < b.g
+	}
+	return a.pos < b.pos
 }
 
 func (w *World) groundLineClearLocked(fromX, fromY, toX, toY, ignoreRadius float32) bool {
@@ -1388,14 +1737,14 @@ func (w *World) pickWaveSpawnPositionLocked(unitType int16, team TeamID) (float3
 		return 0, 0, false
 	}
 	prof, _ := w.unitRuntimeProfileForTypeLocked(unitType)
-	flying := prof.Flying
+	ignoresGroundBlock := prof.Flying || prof.Naval || prof.Hover || prof.MovementClass == "naval" || prof.MovementClass == "hover"
 	bestX, bestY := -1, -1
 	bestScore := float32(-1)
 	tryCell := func(x, y int) {
 		if x < 0 || y < 0 || x >= w.model.Width || y >= w.model.Height {
 			return
 		}
-		if !flying && w.groundCellBlockedLocked(x, y) {
+		if !ignoresGroundBlock && w.groundCellBlockedLocked(x, y) {
 			return
 		}
 		wx, wy := tileCenterWorld(x, y)

@@ -24,17 +24,19 @@ type snapshotCacheEntry struct {
 }
 
 type Core3 struct {
-	name        string
-	messages    chan Message
-	workerCount int
-	wg          sync.WaitGroup
-	running     atomic.Bool
-	stats       *Stats
-	serverCore  atomic.Value // *ServerCore
+	name         string
+	messages     chan Message
+	workerCount  int
+	wg           sync.WaitGroup
+	running      atomic.Bool
+	localWorkers atomic.Bool
+	stats        *Stats
+	serverCore   atomic.Value // *ServerCore
 
 	cacheMu        sync.Mutex
 	entry          *snapshotCacheEntry
 	cacheBaseModel bool
+	copyOnRead     bool
 
 	remoteMu sync.RWMutex
 	remote   *remoteCore3Client
@@ -56,6 +58,7 @@ func NewCore3(cfg Config) *Core3 {
 		messages:       make(chan Message, cfg.MessageBuf),
 		workerCount:    cfg.WorkerCount,
 		cacheBaseModel: true,
+		copyOnRead:     true,
 		stats: &Stats{
 			lastUpdate: time.Now().UnixNano(),
 		},
@@ -73,12 +76,21 @@ func (c3 *Core3) SetCacheBaseModel(enabled bool) {
 	c3.cacheBaseModel = enabled
 }
 
+func (c3 *Core3) SetCopyOnRead(enabled bool) {
+	if c3 == nil {
+		return
+	}
+	c3.copyOnRead = enabled
+}
+
 func (c3 *Core3) Start() {
 	if c3.remoteClient() != nil {
 		c3.running.Store(true)
+		c3.localWorkers.Store(false)
 		return
 	}
 	if !c3.running.Swap(true) {
+		c3.localWorkers.Store(true)
 		c3.wg.Add(c3.workerCount)
 		for i := 0; i < c3.workerCount; i++ {
 			go c3.worker()
@@ -104,6 +116,14 @@ func (c3 *Core3) worker() {
 }
 
 func (c3 *Core3) Stop() {
+	if c3.localWorkers.Load() {
+		if c3.running.Swap(false) {
+			close(c3.messages)
+			c3.wg.Wait()
+		}
+		c3.localWorkers.Store(false)
+		return
+	}
 	if c3.remoteClient() != nil {
 		c3.running.Store(false)
 		return
@@ -145,9 +165,11 @@ func (c3 *Core3) GetWorldCache(path string) (SnapshotResult, error) {
 	if remote := c3.remoteClient(); remote != nil {
 		if res, err := remote.getWorld(path); err == nil {
 			return res, nil
+		} else {
+			c3.AttachRemote(nil)
 		}
 	}
-	if !c3.running.Load() {
+	if !c3.localWorkers.Load() {
 		return c3.getWorldCache(path)
 	}
 	ch := make(chan SnapshotResult, 1)
@@ -165,9 +187,11 @@ func (c3 *Core3) InvalidateWorldCache(path string) error {
 	if remote := c3.remoteClient(); remote != nil {
 		if err := remote.invalidateWorld(path); err == nil {
 			return nil
+		} else {
+			c3.AttachRemote(nil)
 		}
 	}
-	if !c3.running.Load() {
+	if !c3.localWorkers.Load() {
 		return c3.invalidateWorldCache(path)
 	}
 	ch := make(chan SnapshotResult, 1)
@@ -242,14 +266,14 @@ func (c3 *Core3) getWorldCache(path string) (SnapshotResult, error) {
 	defer c3.cacheMu.Unlock()
 	if entry, ok := c3.lookupValidEntryLocked(path, info.ModTime()); ok {
 		entry.lastAccess = time.Now()
-		return snapshotResultFromEntry(entry, "active"), nil
+		return snapshotResultFromEntry(entry, "active", c3.copyOnRead), nil
 	}
 	entry, err := c3.loadEntryLocked(path, info.ModTime())
 	if err != nil {
 		return SnapshotResult{}, err
 	}
 	c3.entry = entry
-	return snapshotResultFromEntry(entry, "active"), nil
+	return snapshotResultFromEntry(entry, "active", c3.copyOnRead), nil
 }
 
 func (c3 *Core3) lookupValidEntryLocked(path string, modTime time.Time) (*snapshotCacheEntry, bool) {
@@ -301,12 +325,16 @@ func loadWorldCachePayload(path string) ([]byte, error) {
 	return os.ReadFile(path)
 }
 
-func snapshotResultFromEntry(entry *snapshotCacheEntry, level string) SnapshotResult {
+func snapshotResultFromEntry(entry *snapshotCacheEntry, level string, copyData bool) SnapshotResult {
 	if entry == nil {
 		return SnapshotResult{}
 	}
+	data := entry.data
+	if copyData {
+		data = append([]byte(nil), entry.data...)
+	}
 	res := SnapshotResult{
-		Data:      append([]byte(nil), entry.data...),
+		Data:      data,
 		BaseModel: entry.baseModel,
 		CorePos:   entry.corePos,
 		CorePosOK: entry.corePosOK,

@@ -3,7 +3,6 @@ package world
 import (
 	"log"
 	"math/rand"
-	"strings"
 	"time"
 )
 
@@ -648,7 +647,7 @@ func (w *World) turretHandleItemLocked(pos int32, tile *Tile, item ItemID, amoun
 		}
 		if w.blockSyncLogsEnabled {
 			log.Printf("[turret-ammo] accept pos=%d (%d,%d) block=%s tileTeam=%d buildTeam=%d item=%d add=%d totalAmmo=%d stacks=%s",
-				pos, tile.X, tile.Y, strings.ToLower(strings.TrimSpace(w.blockNameByID(int16(tile.Build.Block)))),
+				pos, tile.X, tile.Y, w.blockNameByID(int16(tile.Build.Block)),
 				tile.Team, tile.Build.Team, item, totalAdded, w.totalBuildingAmmoLocked(tile, prof), w.debugItemStacksLocked(tile.Build.Items))
 		}
 		w.emitBlockItemSyncLocked(pos)
@@ -657,7 +656,7 @@ func (w *World) turretHandleItemLocked(pos int32, tile *Tile, item ItemID, amoun
 	tile.Build.Items = append(tile.Build.Items, ItemStack{Item: item, Amount: totalAdded})
 	if w.blockSyncLogsEnabled {
 		log.Printf("[turret-ammo] accept pos=%d (%d,%d) block=%s tileTeam=%d buildTeam=%d item=%d add=%d totalAmmo=%d stacks=%s",
-			pos, tile.X, tile.Y, strings.ToLower(strings.TrimSpace(w.blockNameByID(int16(tile.Build.Block)))),
+			pos, tile.X, tile.Y, w.blockNameByID(int16(tile.Build.Block)),
 			tile.Team, tile.Build.Team, item, totalAdded, w.totalBuildingAmmoLocked(tile, prof), w.debugItemStacksLocked(tile.Build.Items))
 	}
 	w.emitBlockItemSyncLocked(pos)
@@ -668,7 +667,7 @@ func (w *World) turretAmmoUnitsPerItemLocked(tile *Tile, item ItemID) int32 {
 	if w == nil || tile == nil || tile.Build == nil {
 		return 0
 	}
-	name := strings.ToLower(strings.TrimSpace(w.blockNameByID(int16(tile.Build.Block))))
+	name := w.blockNameByID(int16(tile.Build.Block))
 	if ammoByItem, ok := turretItemAmmoMultipliersByName[name]; ok {
 		return ammoByItem[item]
 	}

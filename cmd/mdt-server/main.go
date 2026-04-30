@@ -1885,10 +1885,8 @@ func main() {
 		if conn == nil {
 			return
 		}
-		if !conn.UsesLiveWorldStream() {
-			syncRulesToConn(conn, wld, state.get())
-		}
-		syncAuthoritativeWorldToConn(srv, conn, wld, cache.model(state.get()), cfg.Sync.Strategy)
+		mapPath := state.get()
+		syncPostConnectWorldStateToConn(srv, conn, wld, cache.model(mapPath), mapPath, cfg.Sync.Strategy)
 		showJoinPopupForConn(srv, conn)
 		// Keep connect grace long enough for the official client to finish
 		// applying the streamed world and rebinding its spawned unit.
@@ -1901,10 +1899,8 @@ func main() {
 		if conn == nil {
 			return
 		}
-		if !conn.UsesLiveWorldStream() {
-			syncRulesToConn(conn, wld, state.get())
-		}
-		syncAuthoritativeWorldToConn(srv, conn, wld, cache.model(state.get()), cfg.Sync.Strategy)
+		mapPath := state.get()
+		syncPostConnectWorldStateToConn(srv, conn, wld, cache.model(mapPath), mapPath, cfg.Sync.Strategy)
 		srv.RefreshPlayerDisplayNames()
 		conn.SetWorldReloadGrace(2 * time.Second)
 	}
@@ -2252,13 +2248,15 @@ func main() {
 		nextTurretSnapshotSync := time.Now()
 		nextPayloadProcessorSnapshotSync := time.Now()
 		nextPlanPreviewSync := time.Now()
+		eventBuf := make([]world.EntityEvent, 0, 1024)
 		for range t.C {
 			now := time.Now()
 			if !now.Before(nextPlanPreviewSync) {
 				srv.BroadcastStoredClientPlanPreviewsAt(now)
 				nextPlanPreviewSync = now.Add(500 * time.Millisecond)
 			}
-			evs := wld.DrainEntityEvents()
+			eventBuf = wld.DrainEntityEventsInto(eventBuf)
+			evs := eventBuf
 			groupedExplosionBuilds := classifyReactorExplosionBuilds(wld, evs)
 			buildHealth := make([]int32, 0, len(evs)*2)
 			blockItemSync := make(map[int32]struct{})
@@ -2850,11 +2848,52 @@ func main() {
 	}
 
 	var engine *sim.Engine
-	if cfg.Core.DualCoreEnabled {
-		ioWorkers := cfg.Runtime.Cores / 2
-		if ioWorkers < 2 {
-			ioWorkers = 2
+	resolveRuntimeBudgets := func() (totalCores, ioWorkers, simWorkers int) {
+		totalCores = cfg.Runtime.Cores
+		if totalCores <= 0 {
+			totalCores = runtime.NumCPU()
 		}
+		if cfg.Core.DualCoreEnabled {
+			ioWorkers = 1
+			if totalCores >= 8 {
+				ioWorkers = 2
+			}
+		}
+		simWorkers = totalCores - 1 - ioWorkers
+		if simWorkers < 1 {
+			simWorkers = 1
+		}
+		if simWorkers > totalCores {
+			simWorkers = totalCores
+		}
+		return totalCores, ioWorkers, simWorkers
+	}
+	totalRuntimeCores, ioWorkers, schedulerWorkers := resolveRuntimeBudgets()
+	if cfg.Runtime.SchedulerEnabled {
+		engine = sim.NewEngine(sim.Config{
+			TPS:        gameTPS,
+			Cores:      totalRuntimeCores,
+			Partitions: schedulerWorkers,
+		})
+		wld.SetScheduler(engine)
+		startup.ok("世界调度器", fmt.Sprintf("enabled total_cores=%d io_workers=%d sim_workers=%d", totalRuntimeCores, ioWorkers, schedulerWorkers))
+	} else {
+		wld.SetScheduler(nil)
+		startup.info("世界调度器", "未启用")
+	}
+	runWorldTick := func(delta time.Duration) {
+		step := func() {
+			wld.Step(delta)
+			unitCommands.step(wld)
+			traceWorldRuntimeTick("game_tick")
+		}
+		if engine != nil {
+			engine.RunTick(delta, step)
+			return
+		}
+		step()
+	}
+	if cfg.Core.DualCoreEnabled {
 		serverCore = coreio.NewServerCore(
 			time.Second/time.Duration(gameTPS),
 			coreio.Config{
@@ -2890,9 +2929,7 @@ func main() {
 			}
 		})
 		serverCore.SetGameTickFn(func(_ uint64, delta time.Duration) {
-			wld.Step(delta)
-			unitCommands.step(wld)
-			traceWorldRuntimeTick("game_tick")
+			runWorldTick(delta)
 		})
 
 		netCore := netserver.NewNetworkCoreWithCore(srv, serverCore.Core2)
@@ -3019,9 +3056,7 @@ func main() {
 				}
 				steps := 0
 				for !now.Before(next) && steps < maxCatchUp {
-					wld.Step(interval)
-					unitCommands.step(wld)
-					traceWorldRuntimeTick("game_tick")
+					runWorldTick(interval)
 					steps++
 					next = next.Add(interval)
 					now = time.Now()
@@ -3198,6 +3233,9 @@ func main() {
 			}
 			saveState()
 			saveOps()
+			if engine != nil {
+				engine.Stop()
+			}
 			if serverCore != nil {
 				serverCore.StopAll()
 			}
@@ -6000,7 +6038,7 @@ func syncLiveWorldRuntimeToConn(conn *netserver.Conn, wld *world.World) {
 	for _, pos := range unsupportedPositions {
 		sendAuthoritativeTileStateToConn(conn, wld, pos)
 	}
-	sendBlockSnapshotsToConn(conn, wld)
+	sendBlockSnapshotsForPackedToConn(conn, wld, expandRelatedBlockSyncPackedPositions(wld, unsupportedPositions))
 	sendTileConfigMapToConn(conn, configs)
 }
 
@@ -6034,6 +6072,13 @@ func syncDeferredLiveRuntimeStateToConn(srv *netserver.Server, conn *netserver.C
 	}
 }
 
+func liveRuntimeRepairDelay(srv *netserver.Server) time.Duration {
+	_ = srv
+	// Keep the second-pass repair behind the initial reload/respawn window so
+	// streamed tiles have time to materialize their building entities client-side.
+	return 550 * time.Millisecond
+}
+
 func scheduleCurrentRuntimeStateRepair(srv *netserver.Server, conn *netserver.Conn, wld *world.World, mapPath string, delay time.Duration) {
 	if srv == nil || conn == nil || wld == nil || delay <= 0 || !conn.UsesLiveWorldStream() {
 		return
@@ -6048,6 +6093,21 @@ func scheduleCurrentRuntimeStateRepair(srv *netserver.Server, conn *netserver.Co
 		// state/block snapshots without re-sending setTile for the whole map.
 		syncDeferredLiveRuntimeStateToConn(srv, c, wld, mapPath)
 	}(conn)
+}
+
+func syncPostConnectWorldStateToConn(srv *netserver.Server, conn *netserver.Conn, wld *world.World, baseModel *world.WorldModel, mapPath string, strategy config.AuthoritySyncStrategy) {
+	if conn == nil || wld == nil {
+		return
+	}
+	if conn.UsesLiveWorldStream() {
+		// The live world-stream payload already carries the current structural map.
+		// Delay the runtime repair pass so the client can finish constructing tile
+		// entities before block snapshots/config packets arrive.
+		scheduleCurrentRuntimeStateRepair(srv, conn, wld, mapPath, liveRuntimeRepairDelay(srv))
+		return
+	}
+	syncRulesToConn(conn, wld, mapPath)
+	syncAuthoritativeWorldToConn(srv, conn, wld, baseModel, strategy)
 }
 
 func syncAuthoritativeWorldToConn(srv *netserver.Server, conn *netserver.Conn, wld *world.World, baseModel *world.WorldModel, strategy config.AuthoritySyncStrategy) {
@@ -6123,6 +6183,7 @@ func syncWorldDiffToConn(conn *netserver.Conn, wld *world.World, baseModel *worl
 	health := make([]int32, 0, 256)
 	changedPacked := make([]int32, 0, 256)
 	configs := make(map[int32]any, 64)
+	runtimeChangedPacked := wld.RuntimeChangedBlockSyncPackedPositions(baseModel)
 	for _, pos := range positions {
 		baseState, baseOK := baseByPos[pos]
 		liveState, liveOK := liveByPos[pos]
@@ -6143,12 +6204,9 @@ func syncWorldDiffToConn(conn *netserver.Conn, wld *world.World, baseModel *worl
 			baseState.BlockID != liveState.BlockID ||
 			baseState.Team != liveState.Team ||
 			baseState.Rotation != liveState.Rotation
-		if baseOK && liveOK &&
-			baseState.BlockID == liveState.BlockID &&
-			baseState.Team == liveState.Team &&
-			baseState.Rotation == liveState.Rotation &&
-			sameBuildHealth(baseState.Health, liveState.Health) &&
-			sameConfigBytes(baseState.Config, liveState.Config) {
+		healthChanged := !(baseOK && liveOK && sameBuildHealth(baseState.Health, liveState.Health))
+		configChanged := !(baseOK && liveOK && sameConfigBytes(baseState.Config, liveState.Config))
+		if !structuralChange && !healthChanged && !configChanged {
 			continue
 		}
 
@@ -6173,6 +6231,24 @@ func syncWorldDiffToConn(conn *netserver.Conn, wld *world.World, baseModel *worl
 				Block:   protocol.BlockRef{BlkID: blockID, BlkName: ""},
 				Builder: nil,
 			})
+			changedPacked = append(changedPacked, pos)
+			continue
+		}
+
+		if !structuralChange {
+			if healthChanged {
+				hp := liveState.Health
+				if hp <= 0 {
+					hp = 1000
+				}
+				health = append(health, pos, int32(math.Float32bits(hp)))
+				if len(health) >= 256 {
+					_ = conn.SendAsync(&protocol.Remote_Tile_buildHealthUpdate_144{
+						Buildings: protocol.IntSeq{Items: append([]int32(nil), health...)},
+					})
+					health = health[:0]
+				}
+			}
 			changedPacked = append(changedPacked, pos)
 			continue
 		}
@@ -6215,12 +6291,8 @@ func syncWorldDiffToConn(conn *netserver.Conn, wld *world.World, baseModel *worl
 			Buildings: protocol.IntSeq{Items: health},
 		})
 	}
+	changedPacked = append(changedPacked, runtimeChangedPacked...)
 	sendBlockSnapshotsForPackedToConn(conn, wld, expandRelatedBlockSyncPackedPositions(wld, changedPacked))
-	// The template world stream replays the .msav baseline. Structural diff only
-	// updates changed tiles; unchanged conveyors, unloaders, containers, turrets,
-	// crafters and factories still need live writeSync bytes so /sync and initial
-	// connect do not roll item/progress/ammo state back to map-load values.
-	sendBlockSnapshotsToConn(conn, wld)
 	syncCoreItemsToConn(conn, wld)
 	sendTileConfigMapToConn(conn, configs)
 }
@@ -6362,7 +6434,8 @@ func buildRuntimeRulesRaw(wld *world.World, mapPath string) string {
 	merged["waveTimer"] = rules.WaveTimer
 	merged["airUseSpawns"] = rules.AirUseSpawns
 	merged["wavesSpawnAtCores"] = rules.WavesSpawnAtCores
-	merged["waveSpacing"] = rules.WaveSpacing
+	merged["waveSpacing"] = rules.WaveSpacing * 60
+	merged["initialWaveSpacing"] = rules.InitialWaveSpacing * 60
 	merged["pvp"] = rules.Pvp
 	merged["attackMode"] = rules.AttackMode
 	merged["editor"] = rules.Editor
@@ -6747,6 +6820,16 @@ func (m *statusMonitor) FormatOnce() string {
 	uptime := time.Since(m.start).Truncate(time.Second)
 	base := fmt.Sprintf("status: pid=%d uptime=%s goroutines=%d mem=%.1fMB sys=%.1fMB sessions=%d",
 		os.Getpid(), uptime, runtime.NumGoroutine(), float64(ms.Alloc)/1024/1024, float64(ms.Sys)/1024/1024, len(m.srv.ListSessions()))
+	if m.srv != nil {
+		snapStats := m.srv.EntitySnapshotCacheStats()
+		base = fmt.Sprintf("%s snap_cache(hit=%d miss=%d build=%s filter=%s)",
+			base,
+			snapStats.Hits,
+			snapStats.Misses,
+			snapStats.LastBuildDuration.Truncate(time.Millisecond),
+			snapStats.LastFilterDuration.Truncate(time.Millisecond),
+		)
+	}
 	if m.engine == nil {
 		return base
 	}
@@ -6759,7 +6842,14 @@ func (m *statusMonitor) FormatOnce() string {
 	if !stats.LastTickTime.IsZero() {
 		last = stats.LastTickTime.Format("15:04:05")
 	}
-	return fmt.Sprintf("%s tick=%d tps=%d last=%s last_dur=%s part=%d work=%d %s",
+	util := "n/a"
+	if stats.LastDispatch.Partitions > 0 && stats.LastDispatch.DispatchDuration > 0 {
+		capacity := float64(stats.LastDispatch.DispatchDuration.Nanoseconds() * int64(stats.LastDispatch.Partitions))
+		if capacity > 0 {
+			util = fmt.Sprintf("%.0f%%", float64(stats.LastDispatch.WorkDuration.Nanoseconds())*100/capacity)
+		}
+	}
+	return fmt.Sprintf("%s tick=%d tps=%d last=%s last_dur=%s part=%d work=%d workers=%d disp=%s busy=%s idle=%s util=%s %s",
 		base,
 		stats.Tick,
 		stats.TPS,
@@ -6767,6 +6857,11 @@ func (m *statusMonitor) FormatOnce() string {
 		stats.LastDuration.Truncate(time.Millisecond),
 		stats.Partitions,
 		stats.TotalWork,
+		stats.WorkerCount,
+		stats.LastDispatch.DispatchDuration.Truncate(time.Millisecond),
+		stats.LastDispatch.WorkDuration.Truncate(time.Millisecond),
+		stats.LastDispatch.IdleDuration.Truncate(time.Millisecond),
+		util,
 		overrun)
 }
 
@@ -7598,19 +7693,6 @@ func buildInitialWorldDataPayload(conn *netserver.Conn, wld *world.World, cache 
 		}
 		return patched, true, nil
 	}
-	if wld != nil {
-		snap := wld.Snapshot()
-		if liveModel := wld.CloneModelForWorldStream(); liveModel != nil {
-			if payload, ok, err := buildSnapshotPayload(liveModel, snap); err != nil {
-				return nil, err
-			} else if ok {
-				if conn != nil {
-					conn.SetLiveWorldStream(true)
-				}
-				return payload, nil
-			}
-		}
-	}
 	if conn != nil {
 		conn.SetLiveWorldStream(false)
 	}
@@ -7636,6 +7718,9 @@ func buildInitialWorldDataPayload(conn *netserver.Conn, wld *world.World, cache 
 			if payload, ok, err := buildSnapshotPayload(baseModel, snap); err != nil {
 				return nil, err
 			} else if ok {
+				if conn != nil {
+					conn.SetLiveWorldStream(true)
+				}
 				return payload, nil
 			}
 		}

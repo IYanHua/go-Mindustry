@@ -114,7 +114,7 @@ func (w *World) visibleToTeamLocked(viewerTeam TeamID, viewerX, viewerY, targetX
 		if tile.Build == nil || tile.Build.Health <= 0 {
 			continue
 		}
-		name := strings.ToLower(strings.TrimSpace(w.blockNameByID(int16(tile.Block))))
+		name := w.blockNameByID(int16(tile.Block))
 		if !buildingProvidesFogVision(name) {
 			continue
 		}

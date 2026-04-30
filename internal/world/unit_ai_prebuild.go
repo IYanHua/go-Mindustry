@@ -250,7 +250,7 @@ func (w *World) prebuildPlanConnectedLocked(team TeamID, plan teamBuildPlan) boo
 }
 
 func (w *World) prebuildProductionLikeBlockLocked(blockID int16) bool {
-	name := strings.ToLower(strings.TrimSpace(w.blockNameByID(blockID)))
+	name := w.blockNameByID(blockID)
 	switch {
 	case strings.Contains(name, "drill"),
 		strings.Contains(name, "pump"),

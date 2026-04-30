@@ -17,6 +17,14 @@ import (
 const core2IPCTimeout = 5 * time.Second
 const policyIPCTimeout = 250 * time.Millisecond
 
+var spawnChildCoreProcessFn = spawnChildCoreProcess
+var closeChildCoreProcessFn = func(child *childCoreProcess) error {
+	if child == nil {
+		return nil
+	}
+	return child.Close()
+}
+
 type childCoreProcess struct {
 	Role     string
 	Endpoint string
@@ -210,12 +218,8 @@ func (r *remoteCore3Client) getWorld(path string) (SnapshotResult, error) {
 	if err := r.client.CallWithTimeout("core3.get_world", ipcWorldCacheRequest{Path: path}, &resp, core2IPCTimeout); err != nil {
 		return SnapshotResult{}, err
 	}
-	// Keep a dedicated copy on the parent side. The world cache payload is large,
-	// but the extra copy is preferable to risking reused/corrupted backing memory
-	// on the long-lived Windows IPC path during connect-time world fetches.
-	data := append([]byte(nil), resp.Data...)
 	return SnapshotResult{
-		Data:      data,
+		Data:      resp.Data,
 		CorePos:   protocol.Point2{X: resp.CorePosX, Y: resp.CorePosY},
 		CorePosOK: resp.CorePosOK,
 		Level:     resp.Level,
@@ -314,8 +318,20 @@ func (s *coreSupervisor) setUnexpectedExitHandler(fn func(role string, err error
 
 func (s *coreSupervisor) add(role string, child *childCoreProcess) {
 	s.mu.Lock()
-	defer s.mu.Unlock()
+	if s.closed {
+		s.mu.Unlock()
+		_ = closeChildCoreProcessFn(child)
+		return
+	}
+	var previous *childCoreProcess
+	if existing, ok := s.children[role]; ok && existing != nil && existing != child {
+		previous = existing
+	}
 	s.children[role] = child
+	s.mu.Unlock()
+	if previous != nil {
+		_ = closeChildCoreProcessFn(previous)
+	}
 	go s.watchChild(role, child)
 }
 

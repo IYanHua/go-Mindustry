@@ -476,7 +476,7 @@ func (w *World) buildingArmorLocked(pos int32) float32 {
 	if tile.Block == 0 {
 		return 0
 	}
-	name := strings.ToLower(strings.TrimSpace(w.blockNameByID(int16(tile.Block))))
+	name := w.blockNameByID(int16(tile.Block))
 	if name == "" {
 		return 0
 	}

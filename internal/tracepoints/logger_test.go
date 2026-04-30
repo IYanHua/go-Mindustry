@@ -6,6 +6,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"mdt-server/internal/protocol"
 )
 
 func TestLoggerCloseFlushesAndReleasesFile(t *testing.T) {
@@ -59,5 +61,22 @@ func TestLoggerLogAfterCloseIsIgnored(t *testing.T) {
 	}
 	if strings.TrimSpace(string(raw)) != "" {
 		t.Fatalf("expected no data after log-on-closed logger, got %q", string(raw))
+	}
+}
+
+func TestPacketFieldsSummarizesBinaryPayloads(t *testing.T) {
+	fields := PacketFields("send", &protocol.StreamChunk{ID: 7, Data: []byte{1, 2, 3, 4}}, 1, -1, 10, nil)
+	summary, _ := fields["summary"].(string)
+	if summary != "streamChunk id=7 bytes=4" {
+		t.Fatalf("expected compact stream summary, got %q", summary)
+	}
+	if strings.Contains(summary, "[1 2 3 4]") {
+		t.Fatalf("expected binary payload bytes to be omitted, got %q", summary)
+	}
+
+	fields = PacketFields("send", &protocol.Remote_NetClient_blockSnapshot_34{Amount: 2, Data: []byte{9, 8, 7}}, 34, -1, 12, nil)
+	summary, _ = fields["summary"].(string)
+	if summary != "blockSnapshot amount=2 bytes=3" {
+		t.Fatalf("expected compact block snapshot summary, got %q", summary)
 	}
 }

@@ -172,6 +172,25 @@ func TestRulesManagerFromTagsSupportsMindustryJsonIOStyleRules(t *testing.T) {
 	}
 }
 
+func TestRulesManagerFromTagsConvertsVanillaWaveTicksToSeconds(t *testing.T) {
+	tags := map[string]string{
+		"rules": `{waveSpacing:7200,initialWaveSpacing:3600}`,
+	}
+
+	rm := NewRulesManager(nil)
+	if err := rm.FromTags(tags); err != nil {
+		t.Fatalf("expected Java-style rules tag to parse, got %v", err)
+	}
+
+	rules := rm.Get()
+	if rules.WaveSpacing != 120 {
+		t.Fatalf("expected waveSpacing=120 seconds, got %f", rules.WaveSpacing)
+	}
+	if rules.InitialWaveSpacing != 60 {
+		t.Fatalf("expected initialWaveSpacing=60 seconds, got %f", rules.InitialWaveSpacing)
+	}
+}
+
 func TestDescribeRuleModePrefersInferredModeAndFlags(t *testing.T) {
 	model := NewWorldModel(8, 8)
 	model.Tags = map[string]string{"mode": "sandbox"}

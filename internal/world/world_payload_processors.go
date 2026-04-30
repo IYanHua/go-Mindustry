@@ -839,6 +839,7 @@ func (w *World) stepReconstructorLocked(pos int32, tile *Tile, frames float32) {
 	if !ok {
 		return
 	}
+	scaledFrames, scaledSeconds := w.scaledBuildingDeltaLocked(pos, frames, frames/60)
 	if st.Payload == nil {
 		state.Progress = 0
 		w.storeReconstructorStateLocked(pos, state)
@@ -854,7 +855,7 @@ func (w *World) stepReconstructorLocked(pos int32, tile *Tile, frames float32) {
 		return
 	}
 	moveTime := w.unitBlockPayloadMoveFramesLocked(tile)
-	st.Move += frames
+	st.Move += scaledFrames
 	if st.Move < moveTime {
 		w.storeReconstructorStateLocked(pos, state)
 		w.syncPayloadTileLocked(tile, st.Payload)
@@ -864,15 +865,15 @@ func (w *World) stepReconstructorLocked(pos int32, tile *Tile, frames float32) {
 	speedMul := w.unitBuildSpeedMultiplierLocked(tile.Build.Team, w.rulesMgr.Get())
 	canProgress := speedMul > 0 && hasRequiredItemsLocked(tile.Build, scaledItems)
 	if canProgress && prof.InputLiquid != nil && prof.InputLiquid.Amount > 0 {
-		if !consumeBuildingLiquidLocked(tile.Build, prof.InputLiquid.Liquid, prof.InputLiquid.Amount*frames) {
+		if !consumeBuildingLiquidLocked(tile.Build, prof.InputLiquid.Liquid, prof.InputLiquid.Amount*scaledFrames) {
 			canProgress = false
 		}
 	}
-	if canProgress && prof.PowerPerSecond > 0 && !w.requirePowerAtLocked(pos, tile.Build.Team, prof.PowerPerSecond*(frames/60)) {
+	if canProgress && prof.PowerPerSecond > 0 && !w.requirePowerAtLocked(pos, tile.Build.Team, prof.PowerPerSecond*scaledSeconds) {
 		canProgress = false
 	}
 	if canProgress {
-		state.Progress += frames * speedMul
+		state.Progress += scaledFrames * speedMul
 	}
 	if state.Progress >= prof.ConstructTimeFrames {
 		if hasRequiredItemsLocked(tile.Build, scaledItems) {

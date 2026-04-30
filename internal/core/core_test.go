@@ -2,6 +2,7 @@ package core
 
 import (
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"sync"
@@ -230,6 +231,24 @@ func TestCore3ConcurrentRemoteAttachDetachAccess(t *testing.T) {
 	wg.Wait()
 }
 
+func TestCore3RemoteFailureFallsBackToDirectLoadAfterRemoteOnlyStart(t *testing.T) {
+	c3 := NewCore3(Config{Name: "snapshot", MessageBuf: 4, WorkerCount: 1})
+	c3.AttachRemote(&ipcClient{})
+	c3.Start()
+
+	started := time.Now()
+	_, err := c3.GetWorldCache(filepath.Join(t.TempDir(), "missing.msav"))
+	if err == nil {
+		t.Fatal("expected missing world cache path error")
+	}
+	if time.Since(started) > time.Second {
+		t.Fatalf("expected direct fallback without queue deadlock, elapsed=%s", time.Since(started))
+	}
+	if c3.remoteClient() != nil {
+		t.Fatal("expected remote snapshot client to detach after fallback")
+	}
+}
+
 func TestCore2SaveLoadWorld(t *testing.T) {
 	c2 := NewCore2(Config{Name: "test", MessageBuf: 4, WorkerCount: 1})
 	dir := t.TempDir()
@@ -438,6 +457,103 @@ func TestCore4PolicyRateLimitAndShardAssignment(t *testing.T) {
 	}
 	if coreShard.CoreShard <= 0 {
 		t.Fatalf("expected positive core shard, got %d", coreShard.CoreShard)
+	}
+}
+
+func TestCore4RemoteFailureFallsBackToLocalPolicyAfterRemoteOnlyStart(t *testing.T) {
+	c4 := NewCore4(Config{Name: "policy", MessageBuf: 4, WorkerCount: 1})
+	c4.AttachRemote(&ipcClient{})
+	c4.Start()
+
+	started := time.Now()
+	res, err := c4.AllowConnection("127.0.0.1", "uuid-a")
+	if err != nil {
+		t.Fatalf("expected local fallback instead of remote error, err=%v", err)
+	}
+	if !res.Allowed {
+		t.Fatalf("expected local fallback policy to allow first connection, got %+v", res)
+	}
+	if time.Since(started) > time.Second {
+		t.Fatalf("expected direct fallback without queue deadlock, elapsed=%s", time.Since(started))
+	}
+	if c4.remoteClient() != nil {
+		t.Fatal("expected remote policy client to detach after fallback")
+	}
+}
+
+func TestCore4PrunesExpiredPolicyWindows(t *testing.T) {
+	c4 := NewCore4(Config{Name: "policy", MessageBuf: 4, WorkerCount: 1})
+	c4.SetPolicyConfig(PolicyConfig{
+		ConnectionBurst:  1,
+		ConnectionWindow: time.Second,
+		PacketBurst:      1,
+		PacketWindow:     time.Second,
+		PlayerShards:     4,
+		CoreShards:       4,
+	})
+
+	c4.stateMu.Lock()
+	now := time.Now()
+	c4.connectionWindows["expired-conn"] = &policyWindow{count: 1, resetAt: now.Add(-time.Second)}
+	c4.packetWindows["expired-packet"] = &policyWindow{count: 1, resetAt: now.Add(-time.Second)}
+	c4.nextPruneAt = time.Time{}
+	c4.stateMu.Unlock()
+
+	if _, err := c4.AllowConnection("127.0.0.1", "uuid-prune"); err != nil {
+		t.Fatalf("AllowConnection: %v", err)
+	}
+
+	c4.stateMu.Lock()
+	defer c4.stateMu.Unlock()
+	if _, ok := c4.connectionWindows["expired-conn"]; ok {
+		t.Fatal("expected expired connection window to be pruned")
+	}
+	if _, ok := c4.packetWindows["expired-packet"]; ok {
+		t.Fatal("expected expired packet window to be pruned")
+	}
+}
+
+func TestEnableChildRolesRollsBackPendingChildrenOnSpawnFailure(t *testing.T) {
+	oldSpawn := spawnChildCoreProcessFn
+	oldClose := closeChildCoreProcessFn
+	defer func() {
+		spawnChildCoreProcessFn = oldSpawn
+		closeChildCoreProcessFn = oldClose
+	}()
+
+	var closed []string
+	closeChildCoreProcessFn = func(child *childCoreProcess) error {
+		if child != nil {
+			closed = append(closed, child.Role)
+		}
+		return nil
+	}
+
+	spawned := 0
+	spawnChildCoreProcessFn = func(exePath, role string, extraArgs ...string) (*childCoreProcess, error) {
+		spawned++
+		if role == "core3" {
+			return nil, fmt.Errorf("boom")
+		}
+		return &childCoreProcess{Role: role}, nil
+	}
+
+	sc := NewServerCore(time.Second/60, Config{Name: "test", MessageBuf: 4, WorkerCount: 1}, config.PersistConfig{})
+	err := sc.EnableChildRoles("fake.exe", nil, "core2", "core3", "core4")
+	if err == nil || err.Error() != "boom" {
+		t.Fatalf("expected spawn failure, got %v", err)
+	}
+	if spawned != 2 {
+		t.Fatalf("expected spawn attempts to stop on first failure, got %d", spawned)
+	}
+	if len(closed) != 1 || closed[0] != "core2" {
+		t.Fatalf("expected only spawned core2 child to be rolled back, closed=%v", closed)
+	}
+	if sc.Core2.remoteClient() != nil || sc.Core3.remoteClient() != nil || sc.Core4.remoteClient() != nil {
+		t.Fatal("expected no child remotes to attach after rollback")
+	}
+	if len(sc.supervisor.children) != 0 {
+		t.Fatalf("expected supervisor to remain empty after rollback, got %d children", len(sc.supervisor.children))
 	}
 }
 

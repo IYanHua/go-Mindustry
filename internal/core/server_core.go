@@ -1,6 +1,7 @@
 package core
 
 import (
+	"fmt"
 	"strings"
 	"sync"
 	"time"
@@ -203,33 +204,62 @@ func (sc *ServerCore) EnableChildRoles(exePath string, extraArgs []string, roles
 			return err
 		}
 	}
-	for _, role := range roles {
+	type pendingChild struct {
+		role  string
+		child *childCoreProcess
+	}
+	normalizeRole := func(role string) string {
 		role = strings.ToLower(strings.TrimSpace(role))
+		return role
+	}
+	pending := make([]pendingChild, 0, len(roles))
+	seen := map[string]struct{}{}
+	cleanup := func() {
+		for i := len(pending) - 1; i >= 0; i-- {
+			_ = closeChildCoreProcessFn(pending[i].child)
+		}
+	}
+	for _, rawRole := range roles {
+		role := normalizeRole(rawRole)
 		if role == "" {
 			continue
 		}
-		child, err := spawnChildCoreProcess(exePath, role, extraArgs...)
-		if err != nil {
-			return err
-		}
-		if sc.supervisor != nil {
-			sc.supervisor.add(role, child)
+		if _, ok := seen[role]; ok {
+			continue
 		}
 		switch role {
+		case "core2", "core3", "core4":
+		default:
+			cleanup()
+			return fmt.Errorf("unsupported child core role: %s", role)
+		}
+		child, err := spawnChildCoreProcessFn(exePath, role, extraArgs...)
+		if err != nil {
+			cleanup()
+			return err
+		}
+		seen[role] = struct{}{}
+		pending = append(pending, pendingChild{role: role, child: child})
+	}
+	for _, item := range pending {
+		if sc.supervisor != nil {
+			sc.supervisor.add(item.role, item.child)
+		}
+		switch item.role {
 		case "core2":
 			if sc.Core2 != nil {
-				sc.Core2.AttachRemote(child.Client)
+				sc.Core2.AttachRemote(item.child.Client)
 				if sc.Core2.workerCount > 1 {
 					sc.Core2.workerCount = 1
 				}
 			}
 		case "core3":
 			if sc.Core3 != nil {
-				sc.Core3.AttachRemote(child.Client)
+				sc.Core3.AttachRemote(item.child.Client)
 			}
 		case "core4":
 			if sc.Core4 != nil {
-				sc.Core4.AttachRemote(child.Client)
+				sc.Core4.AttachRemote(item.child.Client)
 			}
 		}
 	}

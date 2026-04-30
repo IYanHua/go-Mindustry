@@ -61,6 +61,8 @@ type unitAbilityProfile struct {
 
 type unitRuntimeProfile struct {
 	Name              string
+	Constructor       string
+	MovementClass     string
 	Health            float32
 	Armor             float32
 	Speed             float32
@@ -75,6 +77,15 @@ type unitRuntimeProfile struct {
 	AmmoRegen         float32
 	PayloadCapacity   float32
 	Flying            bool
+	Naval             bool
+	Legged            bool
+	Tank              bool
+	Hover             bool
+	Crawl             bool
+	PayloadUnit       bool
+	TimedKill         bool
+	BlockUnit         bool
+	BuildingTether    bool
 	LowAltitude       bool
 	CanBoost          bool
 	MineWalls         bool
@@ -156,6 +167,8 @@ func convertVanillaUnitRuntimeProfile(src vanillaUnitProfile) unitRuntimeProfile
 	name := normalizeUnitName(src.Name)
 	out := unitRuntimeProfile{
 		Name:              name,
+		Constructor:       src.Constructor,
+		MovementClass:     strings.ToLower(strings.TrimSpace(src.MovementClass)),
 		Health:            src.Health,
 		Armor:             src.Armor,
 		Speed:             src.Speed,
@@ -169,7 +182,16 @@ func convertVanillaUnitRuntimeProfile(src vanillaUnitProfile) unitRuntimeProfile
 		AmmoPerShot:       src.AmmoPerShot,
 		AmmoRegen:         src.AmmoRegen,
 		PayloadCapacity:   src.PayloadCapacity,
-		Flying:            src.Flying,
+		Flying:            src.Flying || strings.EqualFold(src.MovementClass, "air"),
+		Naval:             src.Naval || strings.EqualFold(src.MovementClass, "naval"),
+		Legged:            src.Legged || strings.EqualFold(src.MovementClass, "legs"),
+		Tank:              src.Tank || strings.EqualFold(src.MovementClass, "tank"),
+		Hover:             src.Hover || strings.EqualFold(src.MovementClass, "hover"),
+		Crawl:             src.Crawl || strings.EqualFold(src.MovementClass, "crawl"),
+		PayloadUnit:       src.PayloadUnit,
+		TimedKill:         src.TimedKill || strings.EqualFold(src.MovementClass, "missile"),
+		BlockUnit:         src.BlockUnit,
+		BuildingTether:    src.BuildingTether,
 		LowAltitude:       src.LowAltitude,
 		CanBoost:          src.CanBoost,
 		MineWalls:         src.MineWalls,
@@ -243,15 +265,18 @@ func (w *World) unitRuntimeProfileByNameLocked(name string) (unitRuntimeProfile,
 	if w == nil || w.unitRuntimeProfilesByName == nil {
 		return unitRuntimeProfile{}, false
 	}
-	name = normalizeUnitName(name)
 	if name == "" {
 		return unitRuntimeProfile{}, false
 	}
-	prof, ok := w.unitRuntimeProfilesByName[name]
-	if !ok {
+	if prof, ok := w.unitRuntimeProfilesByName[name]; ok {
+		return prof, true
+	}
+	normalized := normalizeUnitName(name)
+	if normalized == "" || normalized == name {
 		return unitRuntimeProfile{}, false
 	}
-	return cloneUnitRuntimeProfile(prof), true
+	prof, ok := w.unitRuntimeProfilesByName[normalized]
+	return prof, ok
 }
 
 func (w *World) unitRuntimeProfileForTypeLocked(typeID int16) (unitRuntimeProfile, bool) {

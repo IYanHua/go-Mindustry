@@ -32,11 +32,10 @@ type Snapshot struct {
 }
 
 func (s Snapshot) WaveTimeTicks() float32 {
-	tps := s.Tps
-	if tps <= 0 {
-		tps = 60
-	}
-	return s.WaveTime * float32(tps)
+	// Vanilla stores and transmits GameState.wavetime in 60Hz simulation ticks.
+	// The stateSnapshot TPS byte is diagnostic/interpolation data, not the unit
+	// scale for wave time.
+	return s.WaveTime * 60
 }
 
 type TeamCoreItemSnapshot struct {
@@ -113,6 +112,7 @@ type World struct {
 	// 同步配置
 	useMapSyncDataFallback bool
 	blockSyncLogsEnabled   bool
+	scheduler              worldDispatcher
 
 	entityEvents      []EntityEvent
 	bullets           []simBullet
@@ -121,6 +121,8 @@ type World struct {
 	blockItemSyncTick map[int32]uint64
 
 	blockNamesByID              map[int16]string
+	blockNamesByIndex           []string
+	powerStorageCapacityByBlock []float32
 	unitNamesByID               map[int16]string
 	unitTypeDefsByID            map[int16]vanilla.UnitTypeDef
 	buildStates                 map[int32]buildCombatState
@@ -150,6 +152,9 @@ type World struct {
 	teamPowerBudget             map[TeamID]float32
 	powerNetStates              map[int32]*powerNetState
 	powerNetByPos               map[int32]int32
+	powerNetIDs                 []int32
+	powerNetTeams               map[int32]TeamID
+	powerNetStorageRefs         map[int32][]powerStorageRef
 	powerNetDirty               bool
 	powerStorageState           map[int32]float32
 	powerRequested              map[int32]float32
@@ -237,6 +242,7 @@ type World struct {
 	mendProjectorStates         map[int32]*mendProjectorState
 	overdriveProjectorPositions []int32
 	overdriveProjectorStates    map[int32]*overdriveProjectorState
+	buildingBoostStates         map[int32]buildingBoostState
 	forceProjectorPositions     []int32
 	forceProjectorStates        map[int32]*forceProjectorState
 	nextPlanOrder               uint64
@@ -251,6 +257,13 @@ type World struct {
 	blockArmorByName          map[string]float32
 	statusProfilesByID        map[int16]statusEffectProfile
 	statusProfilesByName      map[string]statusEffectProfile
+
+	groundPathPrev    []int32
+	groundPathCost    []int32
+	groundPathSeen    []uint32
+	groundPathClosed  []uint32
+	groundPathHeap    []groundPathNode
+	groundPathVisitID uint32
 }
 
 const (
@@ -531,6 +544,33 @@ type unloaderCandidateStat struct {
 	lastUsed   int
 }
 
+type itemIDSeenSet struct {
+	bits  uint64
+	extra map[ItemID]struct{}
+}
+
+func (s *itemIDSeenSet) add(item ItemID) bool {
+	if s == nil {
+		return false
+	}
+	if item >= 0 && item < 64 {
+		mask := uint64(1) << uint(item)
+		if (s.bits & mask) != 0 {
+			return false
+		}
+		s.bits |= mask
+		return true
+	}
+	if s.extra == nil {
+		s.extra = make(map[ItemID]struct{}, 4)
+	}
+	if _, exists := s.extra[item]; exists {
+		return false
+	}
+	s.extra[item] = struct{}{}
+	return true
+}
+
 type protocolContentLiquid LiquidID
 
 func (l protocolContentLiquid) ContentType() protocol.ContentType { return protocol.ContentLiquid }
@@ -639,7 +679,7 @@ func (w *World) emitBlockItemSyncLocked(pos int32) {
 	if tile.Build == nil || tile.Block == 0 || tile.Build.Team == 0 {
 		return
 	}
-	name := strings.ToLower(strings.TrimSpace(w.blockNameByID(int16(tile.Block))))
+	name := w.blockNameByID(int16(tile.Block))
 	kind := w.classifyBlockSyncKindLocked(pos, tile, name)
 	if kind == blockSyncNone {
 		return
@@ -725,7 +765,17 @@ func (w *World) replaceBuildingItemsLocked(pos int32, tile *Tile, items []ItemSt
 	if itemStacksEqualByItem(tile.Build.Items, items) {
 		return
 	}
-	tile.Build.Items = cloneItemStacks(items)
+	if len(items) == 0 {
+		tile.Build.Items = nil
+		w.emitBlockItemSyncLocked(pos)
+		return
+	}
+	if cap(tile.Build.Items) < len(items) {
+		tile.Build.Items = make([]ItemStack, len(items))
+	} else {
+		tile.Build.Items = tile.Build.Items[:len(items)]
+	}
+	copy(tile.Build.Items, items)
 	w.emitBlockItemSyncLocked(pos)
 }
 
@@ -781,7 +831,7 @@ func (w *World) DebugItemTurretAmmoPacked(packedPos int32) string {
 	if tile.Build == nil || tile.Block == 0 {
 		return fmt.Sprintf("packed=%d (%d,%d) block=%d build=nil tileTeam=%d", packedPos, tile.X, tile.Y, tile.Block, tile.Team)
 	}
-	name := strings.ToLower(strings.TrimSpace(w.blockNameByID(int16(tile.Block))))
+	name := w.blockNameByID(int16(tile.Block))
 	totalAmmo := int32(0)
 	if prof, ok := w.getBuildingWeaponProfile(int16(tile.Build.Block)); ok && w.buildingUsesItemAmmoLocked(tile, prof) {
 		totalAmmo = w.totalBuildingAmmoLocked(tile, prof)
@@ -1005,6 +1055,9 @@ type buildCombatState struct {
 	Power          float32
 	TargetID       int32
 	RetargetCD     float32
+	TargetBuildPos int32
+	TargetBuildOK  bool
+	BuildTargetCD  float32
 	TurretRotation float32
 	HasRotation    bool
 	BeamBulletID   int32
@@ -1184,6 +1237,18 @@ type vanillaBlockProfile struct {
 type vanillaUnitProfile struct {
 	Name                     string                      `json:"name"`
 	TypeID                   int16                       `json:"type_id"`
+	Constructor              string                      `json:"constructor"`
+	EntityComponents         []string                    `json:"entity_components"`
+	MovementClass            string                      `json:"movement_class"`
+	Naval                    bool                        `json:"naval"`
+	Legged                   bool                        `json:"legged"`
+	Tank                     bool                        `json:"tank"`
+	Hover                    bool                        `json:"hover"`
+	Crawl                    bool                        `json:"crawl"`
+	PayloadUnit              bool                        `json:"payload_unit"`
+	TimedKill                bool                        `json:"timed_kill"`
+	BlockUnit                bool                        `json:"block_unit"`
+	BuildingTether           bool                        `json:"building_tether"`
 	Health                   float32                     `json:"health"`
 	Armor                    float32                     `json:"armor"`
 	Speed                    float32                     `json:"speed"`
@@ -1807,6 +1872,8 @@ func New(cfg Config) *World {
 		teamPowerBudget:             map[TeamID]float32{},
 		powerNetStates:              map[int32]*powerNetState{},
 		powerNetByPos:               map[int32]int32{},
+		powerNetTeams:               map[int32]TeamID{},
+		powerNetStorageRefs:         map[int32][]powerStorageRef{},
 		powerNetDirty:               true,
 		powerStorageState:           map[int32]float32{},
 		powerRequested:              map[int32]float32{},
@@ -1898,6 +1965,7 @@ func New(cfg Config) *World {
 		blockArmorByName:            map[string]float32{},
 		statusProfilesByID:          map[int16]statusEffectProfile{},
 		statusProfilesByName:        map[string]statusEffectProfile{},
+		groundPathVisitID:           1,
 		rulesMgr:                    NewRulesManager(nil),
 		wavesMgr:                    NewWaveManager(nil),
 	}
@@ -1966,13 +2034,15 @@ func (w *World) Step(delta time.Duration) {
 	w.stepNuclearReactors(delta)
 	reactorDur := time.Since(reactorStartedAt)
 
+	w.stepOverdriveProjectorsLocked(delta)
+
 	w.beginTeamPowerStep(delta)
 	factoryStartedAt := time.Now()
 	w.stepFactoryProduction(delta)
-	w.stepDrillProduction(delta)
-	w.stepBurstDrillProduction(delta)
-	w.stepBeamDrillProduction(delta)
-	w.stepPumpProduction(delta)
+	drillParallelDur := w.stepDrillProduction(delta)
+	burstParallelDur := w.stepBurstDrillProduction(delta)
+	beamParallelDur := w.stepBeamDrillProduction(delta)
+	pumpParallelDur := w.stepPumpProduction(delta)
 	w.stepCrafterProduction(delta)
 	w.stepHeatConductorsLocked()
 	w.stepIncinerators(delta)
@@ -1997,6 +2067,7 @@ func (w *World) Step(delta time.Duration) {
 	entitiesStartedAt := time.Now()
 	entityMovementDur, entityCombatDur, buildingCombatDur, bulletDur := w.stepEntities(delta)
 	entitiesDur := time.Since(entitiesStartedAt)
+	w.stepBuildingBoosts(delta)
 	w.endTeamPowerStep()
 
 	totalDur := time.Since(stepStartedAt)
@@ -2017,7 +2088,7 @@ func (w *World) Step(delta time.Duration) {
 		if w.model != nil {
 			entityCount = len(w.model.Entities)
 		}
-		fmt.Printf("[perf] step=%s tps=%d/%d active=%d entities=%d bullets=%d pendingBuilds=%d pendingBreaks=%d phases{build=%s break=%s factory=%s sandbox=%s liquid=%s item=%s payload=%s reactor=%s entities=%s} itemPhases{junction=%s/%d conveyor=%s/%d duct=%s/%d router=%s/%d bridge=%s/%d unloader=%s/%d mass=%s/%d} entityPhases{move=%s combat=%s building=%s bullets=%s}\n",
+		fmt.Printf("[perf] step=%s tps=%d/%d active=%d entities=%d bullets=%d pendingBuilds=%d pendingBreaks=%d phases{build=%s break=%s factory=%s sandbox=%s liquid=%s item=%s payload=%s reactor=%s entities=%s} itemPhases{junction=%s/%d conveyor=%s/%d duct=%s/%d router=%s/%d bridge=%s/%d unloader=%s/%d mass=%s/%d} entityPhases{move=%s combat=%s building=%s bullets=%s} parallel{drillScan=%s burstScan=%s beamScan=%s pumpScan=%s}\n",
 			totalDur.Round(time.Millisecond),
 			w.actualTps,
 			w.tps,
@@ -2053,6 +2124,10 @@ func (w *World) Step(delta time.Duration) {
 			entityCombatDur.Round(time.Millisecond),
 			buildingCombatDur.Round(time.Millisecond),
 			bulletDur.Round(time.Millisecond),
+			drillParallelDur.Round(time.Millisecond),
+			burstParallelDur.Round(time.Millisecond),
+			beamParallelDur.Round(time.Millisecond),
+			pumpParallelDur.Round(time.Millisecond),
 		)
 		w.perfLogAt = time.Now()
 	}
@@ -2355,6 +2430,10 @@ func (w *World) clearBuildingRuntimeLocked(pos int32) {
 	delete(w.repairTurretStates, pos)
 	delete(w.repairTowerStates, pos)
 	delete(w.turretStates, pos)
+	delete(w.mendProjectorStates, pos)
+	delete(w.overdriveProjectorStates, pos)
+	delete(w.buildingBoostStates, pos)
+	delete(w.forceProjectorStates, pos)
 	delete(w.powerStorageState, pos)
 	delete(w.powerGeneratorState, pos)
 }
@@ -3005,11 +3084,32 @@ func (w *World) pushItemSourceLocked(pos int32, tile *Tile, item ItemID, frameDe
 	limit := float32(60) / itemsPerSecond
 	w.itemSourceAccum[pos] += frameDelta
 	for w.itemSourceAccum[pos] >= limit {
-		tile.Build.AddItem(item, 1)
-		w.dumpSingleItemLocked(pos, tile, &item, nil)
-		_ = tile.Build.RemoveItem(item, 1)
+		w.dumpGeneratedItemLocked(pos, tile, item)
 		w.itemSourceAccum[pos] -= limit
 	}
+}
+
+func (w *World) dumpGeneratedItemLocked(pos int32, tile *Tile, item ItemID) bool {
+	if tile == nil || tile.Build == nil || w.model == nil {
+		return false
+	}
+	neighbors := w.dumpProximityLocked(pos)
+	if len(neighbors) == 0 {
+		return false
+	}
+	start := 0
+	if idx, ok := w.blockDumpIndex[pos]; ok {
+		start = ((idx % len(neighbors)) + len(neighbors)) % len(neighbors)
+	}
+	for i := 0; i < len(neighbors); i++ {
+		index := (start + i) % len(neighbors)
+		if w.tryInsertItemLocked(pos, neighbors[index], item, 0) {
+			w.advanceDumpIndexLocked(pos, index+1, len(neighbors))
+			return true
+		}
+		w.advanceDumpIndexLocked(pos, index+1, len(neighbors))
+	}
+	return false
 }
 
 func (w *World) pushLiquidSourceLocked(pos int32, tile *Tile, liquid LiquidID, amount float32) {
@@ -3610,11 +3710,11 @@ func (w *World) syncConveyorInventoryLocked(pos int32, tile *Tile, st *conveyorR
 		}
 	}
 
-	items := make([]ItemStack, 0, used)
+	var items [3]ItemStack
 	for i := 0; i < used; i++ {
-		items = append(items, ItemStack{Item: ids[i], Amount: counts[i]})
+		items[i] = ItemStack{Item: ids[i], Amount: counts[i]}
 	}
-	w.replaceBuildingItemsLocked(pos, tile, items)
+	w.replaceBuildingItemsLocked(pos, tile, items[:used])
 }
 
 func (st *conveyorRuntimeState) add(index int) {
@@ -3835,19 +3935,19 @@ func (w *World) ductBridgeAcceptsItemLocked(fromPos, toPos int32, item ItemID) b
 	if !ok {
 		return false
 	}
-	for i := range w.model.Tiles {
-		if int32(i) == fromPos || int32(i) == toPos {
+	for _, otherPos := range w.itemDuctTilePositions {
+		if otherPos == fromPos || otherPos == toPos || otherPos < 0 || int(otherPos) >= len(w.model.Tiles) {
 			continue
 		}
-		other := &w.model.Tiles[i]
+		other := &w.model.Tiles[otherPos]
 		if other.Build == nil || other.Team != toTile.Team || w.blockNameByID(int16(other.Block)) != "duct-bridge" {
 			continue
 		}
-		target, ok := w.directionBridgeTargetLocked(int32(i), other, "duct-bridge", 4)
+		target, ok := w.directionBridgeTargetLocked(otherPos, other, "duct-bridge", 4)
 		if !ok || target != toPos {
 			continue
 		}
-		dir, ok := w.flowDirBetweenLocked(int32(i), toPos)
+		dir, ok := w.flowDirBetweenLocked(otherPos, toPos)
 		if ok && dir == incomingDir {
 			return false
 		}
@@ -5461,7 +5561,8 @@ func (w *World) stepDirectionalUnloaderLocked(pos int32, tile *Tile, speed float
 		_ = tryMove(item)
 		return
 	}
-	for _, item := range w.rotatedInventoryItemIDsLocked(backPos, w.blockDumpIndex[pos]) {
+	items := w.rotatedInventoryItemIDsLocked(backPos, w.blockDumpIndex[pos])
+	for _, item := range items {
 		if tryMove(item) {
 			w.blockDumpIndex[pos] = int(item) + 1
 			return
@@ -6442,22 +6543,12 @@ func (w *World) refreshCoreStorageLinksLocked() {
 				continue
 			}
 			anchor := &w.model.Tiles[anchorPos]
-			for _, otherPos := range w.teamBuildingTiles[team] {
+			w.forEachTouchingCoreStorageLocked(anchor, team, func(otherPos int32, other *Tile) {
 				if otherPos < 0 || int(otherPos) >= len(w.model.Tiles) || otherPos == anchorPos {
-					continue
+					return
 				}
 				if _, exists := ownedStorages[otherPos]; exists {
-					continue
-				}
-				other := &w.model.Tiles[otherPos]
-				if other.Build == nil || other.Block == 0 || other.Team != team {
-					continue
-				}
-				if !isCoreMergeStorageBlock(w.blockNameByID(int16(other.Block))) {
-					continue
-				}
-				if !w.storageFootprintsTouchLocked(anchor, other) {
-					continue
+					return
 				}
 				ownedStorages[otherPos] = struct{}{}
 				w.storageLinkedCore[otherPos] = primary
@@ -6468,7 +6559,7 @@ func (w *World) refreshCoreStorageLinksLocked() {
 					}
 				}
 				queue = append(queue, otherPos)
-			}
+			})
 		}
 
 		normalized := normalizeItemStackMap(mergedItems, totalCapacity)
@@ -6490,6 +6581,57 @@ func (w *World) refreshCoreStorageLinksLocked() {
 			if build := w.model.Tiles[storagePos].Build; build != nil {
 				build.Items = nil
 			}
+		}
+	}
+}
+
+func (w *World) forEachTouchingCoreStorageLocked(anchor *Tile, team TeamID, visit func(pos int32, tile *Tile)) {
+	if w == nil || w.model == nil || anchor == nil || visit == nil {
+		return
+	}
+	if len(w.blockOccupancy) == 0 {
+		for _, otherPos := range w.teamBuildingTiles[team] {
+			if otherPos < 0 || int(otherPos) >= len(w.model.Tiles) {
+				continue
+			}
+			other := &w.model.Tiles[otherPos]
+			if other.Build == nil || other.Block == 0 || other.Team != team {
+				continue
+			}
+			if !isCoreMergeStorageBlock(w.blockNameByID(int16(other.Block))) || !w.storageFootprintsTouchLocked(anchor, other) {
+				continue
+			}
+			visit(otherPos, other)
+		}
+		return
+	}
+	low, high := blockFootprintRange(w.blockSizeForTileLocked(anchor))
+	minX := anchor.X + low - 1
+	maxX := anchor.X + high + 1
+	minY := anchor.Y + low - 1
+	maxY := anchor.Y + high + 1
+	seen := map[int32]struct{}{}
+	for y := minY; y <= maxY; y++ {
+		for x := minX; x <= maxX; x++ {
+			if !w.model.InBounds(x, y) {
+				continue
+			}
+			otherPos, ok := w.buildingOccupyingCellLocked(x, y)
+			if !ok || otherPos < 0 || int(otherPos) >= len(w.model.Tiles) {
+				continue
+			}
+			if _, exists := seen[otherPos]; exists {
+				continue
+			}
+			seen[otherPos] = struct{}{}
+			other := &w.model.Tiles[otherPos]
+			if other.Build == nil || other.Block == 0 || other.Team != team {
+				continue
+			}
+			if !isCoreMergeStorageBlock(w.blockNameByID(int16(other.Block))) || !w.storageFootprintsTouchLocked(anchor, other) {
+				continue
+			}
+			visit(otherPos, other)
 		}
 	}
 }
@@ -6686,7 +6828,11 @@ func (w *World) unloaderTargetItemLocked(pos int32, neighbors []int32) (ItemID, 
 		}
 		return 0, false
 	}
-	for _, item := range w.rotatedUnloaderCandidateItemIDsLocked(pos, neighbors) {
+	var itemsBuf [32]ItemID
+	var seen itemIDSeenSet
+	items := w.collectUnloaderCandidateItemIDsLocked(pos, neighbors, itemsBuf[:0], &seen)
+	items = rotateItemIDsByStart(items, w.blockDumpIndex[pos])
+	for _, item := range items {
 		if _, _, found := w.unloaderTransferPairPreviewLocked(pos, neighbors, item); found {
 			w.blockDumpIndex[pos] = int(item)
 			return item, true
@@ -6695,13 +6841,7 @@ func (w *World) unloaderTargetItemLocked(pos int32, neighbors []int32) (ItemID, 
 	return 0, false
 }
 
-func (w *World) rotatedUnloaderCandidateItemIDsLocked(pos int32, neighbors []int32) []ItemID {
-	start := 0
-	if idx, ok := w.blockDumpIndex[pos]; ok {
-		start = idx
-	}
-	seen := make(map[ItemID]struct{}, 16)
-	items := make([]ItemID, 0, 16)
+func (w *World) collectUnloaderCandidateItemIDsLocked(pos int32, neighbors []int32, dst []ItemID, seen *itemIDSeenSet) []ItemID {
 	for _, otherPos := range neighbors {
 		if otherPos < 0 || int(otherPos) >= len(w.model.Tiles) || otherPos == pos {
 			continue
@@ -6710,52 +6850,49 @@ func (w *World) rotatedUnloaderCandidateItemIDsLocked(pos int32, neighbors []int
 		if other.Build == nil || other.Team != w.model.Tiles[pos].Team {
 			continue
 		}
-		w.appendInventoryItemIDsLocked(otherPos, &items, seen)
+		dst = w.appendInventoryItemIDsLocked(otherPos, dst, seen)
 	}
-	return rotateItemIDsByStart(items, start)
+	return dst
 }
 
 func (w *World) rotatedInventoryItemIDsLocked(pos int32, start int) []ItemID {
 	items := make([]ItemID, 0, 8)
-	seen := make(map[ItemID]struct{}, 8)
-	w.appendInventoryItemIDsLocked(pos, &items, seen)
+	var seen itemIDSeenSet
+	items = w.appendInventoryItemIDsLocked(pos, items, &seen)
 	return rotateItemIDsByStart(items, start)
 }
 
-func (w *World) appendInventoryItemIDsLocked(pos int32, dst *[]ItemID, seen map[ItemID]struct{}) {
+func (w *World) appendInventoryItemIDsLocked(pos int32, dst []ItemID, seen *itemIDSeenSet) []ItemID {
 	if seen == nil || w.model == nil || pos < 0 || int(pos) >= len(w.model.Tiles) {
-		return
+		return dst
 	}
 	if _, _, build, ok := w.sharedCoreInventoryLocked(pos); ok {
 		for _, stack := range build.Items {
 			if stack.Amount <= 0 {
 				continue
 			}
-			if _, exists := seen[stack.Item]; exists {
-				continue
+			if seen.add(stack.Item) {
+				dst = append(dst, stack.Item)
 			}
-			seen[stack.Item] = struct{}{}
-			*dst = append(*dst, stack.Item)
 		}
-		return
+		return dst
 	}
 	tile := &w.model.Tiles[pos]
 	if tile.Build == nil {
-		return
+		return dst
 	}
 	if w.buildingHidesInventoryItemsLocked(pos, tile) {
-		return
+		return dst
 	}
 	for _, stack := range tile.Build.Items {
 		if stack.Amount <= 0 {
 			continue
 		}
-		if _, exists := seen[stack.Item]; exists {
-			continue
+		if seen.add(stack.Item) {
+			dst = append(dst, stack.Item)
 		}
-		seen[stack.Item] = struct{}{}
-		*dst = append(*dst, stack.Item)
 	}
+	return dst
 }
 
 func rotateItemIDsByStart(items []ItemID, start int) []ItemID {
@@ -6775,10 +6912,16 @@ func rotateItemIDsByStart(items []ItemID, start int) []ItemID {
 	if split == 0 || split >= len(items) {
 		return items
 	}
-	out := make([]ItemID, 0, len(items))
-	out = append(out, items[split:]...)
-	out = append(out, items[:split]...)
-	return out
+	reverseItemIDs(items[:split])
+	reverseItemIDs(items[split:])
+	reverseItemIDs(items)
+	return items
+}
+
+func reverseItemIDs(items []ItemID) {
+	for i, j := 0, len(items)-1; i < j; i, j = i+1, j-1 {
+		items[i], items[j] = items[j], items[i]
+	}
 }
 
 func boolCompare(a, b bool) int {
@@ -6809,7 +6952,11 @@ func (w *World) unloaderTransferPairInternalLocked(pos int32, neighbors []int32,
 		return 0, 0, false
 	}
 
-	stats := make([]unloaderCandidateStat, 0, len(neighbors))
+	var statsBuf [16]unloaderCandidateStat
+	stats := statsBuf[:0]
+	if len(neighbors) > len(statsBuf) {
+		stats = make([]unloaderCandidateStat, 0, len(neighbors))
+	}
 	hasProvider := false
 	hasReceiver := false
 	isDistinct := false
@@ -6923,39 +7070,34 @@ func (w *World) dumpProximityLocked(pos int32) []int32 {
 		return nil
 	}
 	tile := &w.model.Tiles[pos]
-	raw, ok := w.dumpNeighborCache[pos]
+	neighbors, ok := w.dumpNeighborCache[pos]
 	if !ok {
 		offsets := blockEdgeOffsets(w.blockSizeForTileLocked(tile))
-		raw = make([]int32, 0, len(offsets))
-		seen := make(map[int32]struct{}, len(offsets))
+		neighbors = make([]int32, 0, len(offsets))
 		for _, off := range offsets {
 			otherPos, ok := w.buildingOccupyingCellLocked(tile.X+off[0], tile.Y+off[1])
 			if !ok || otherPos == pos {
 				continue
 			}
-			if _, exists := seen[otherPos]; exists {
+			other := &w.model.Tiles[otherPos]
+			if other.Build == nil || other.Block == 0 || other.Team != tile.Team {
 				continue
 			}
-			seen[otherPos] = struct{}{}
-			raw = append(raw, otherPos)
+			duplicate := false
+			for _, existing := range neighbors {
+				if existing == otherPos {
+					duplicate = true
+					break
+				}
+			}
+			if duplicate {
+				continue
+			}
+			neighbors = append(neighbors, otherPos)
 		}
-		w.dumpNeighborCache[pos] = raw
+		w.dumpNeighborCache[pos] = neighbors
 	}
-	if len(raw) == 0 {
-		return nil
-	}
-	out := make([]int32, 0, len(raw))
-	for _, otherPos := range raw {
-		if otherPos < 0 || int(otherPos) >= len(w.model.Tiles) {
-			continue
-		}
-		other := &w.model.Tiles[otherPos]
-		if other.Build == nil || other.Block == 0 || other.Team != tile.Team {
-			continue
-		}
-		out = append(out, otherPos)
-	}
-	return out
+	return neighbors
 }
 
 func (w *World) advanceDumpIndexLocked(pos int32, next int, count int) {
@@ -7324,7 +7466,13 @@ func (w *World) maximumAcceptedItemForBlockLocked(pos int32, tile *Tile, item It
 	if w == nil || tile == nil || tile.Build == nil || tile.Block == 0 {
 		return 0
 	}
-	name := w.blockNameByID(int16(tile.Block))
+	return w.maximumAcceptedItemForBlockNameLocked(pos, tile, w.blockNameByID(int16(tile.Block)), item)
+}
+
+func (w *World) maximumAcceptedItemForBlockNameLocked(pos int32, tile *Tile, name string, item ItemID) int32 {
+	if w == nil || tile == nil || tile.Build == nil || tile.Block == 0 || name == "" {
+		return 0
+	}
 	switch name {
 	case "core-shard", "core-foundation", "core-nucleus", "core-bastion", "core-citadel", "core-acropolis",
 		"container", "vault", "reinforced-container", "reinforced-vault":
@@ -7399,12 +7547,11 @@ func (w *World) buildingUsesTotalItemCapacityLocked(pos int32, tile *Tile) bool 
 	if _, _, _, shared := w.sharedCoreInventoryLocked(pos); shared {
 		return false
 	}
-	switch w.blockNameByID(int16(tile.Block)) {
-	case "container", "vault", "reinforced-container", "reinforced-vault":
-		return true
-	default:
-		return false
-	}
+	return buildingUsesTotalItemCapacityName(w.blockNameByID(int16(tile.Block)))
+}
+
+func buildingUsesTotalItemCapacityName(name string) bool {
+	return name == "container" || name == "vault" || name == "reinforced-container" || name == "reinforced-vault"
 }
 
 func (w *World) acceptsBuildingItemLocked(pos int32, tile *Tile, item ItemID) bool {
@@ -7427,16 +7574,27 @@ func (w *World) storeAcceptedBuildingItemLocked(pos int32, tile *Tile, item Item
 	if amount <= 0 {
 		return false
 	}
+	name := ""
 	if tile != nil && tile.Build != nil {
-		if prof, ok := w.getBuildingWeaponProfile(int16(tile.Build.Block)); ok && w.buildingUsesItemAmmoLocked(tile, prof) {
+		name = w.blockNameByID(int16(tile.Block))
+		if name == "" {
+			name = w.blockNameByID(int16(tile.Build.Block))
+		}
+		if prof, ok := w.buildingWeaponProfileByNameLocked(name); ok && classifyTurretBlockSyncKind(name, prof) == blockSyncItemTurret {
 			return w.turretHandleItemLocked(pos, tile, item, amount)
 		}
 	}
-	cap := w.maximumAcceptedItemForBlockLocked(pos, tile, item)
+	cap := w.maximumAcceptedItemForBlockNameLocked(pos, tile, name, item)
 	if cap <= 0 {
 		return false
 	}
-	if w.buildingUsesTotalItemCapacityLocked(pos, tile) {
+	usesTotal := buildingUsesTotalItemCapacityName(name)
+	if usesTotal {
+		if _, _, _, shared := w.sharedCoreInventoryLocked(pos); shared {
+			usesTotal = false
+		}
+	}
+	if usesTotal {
 		if w.totalItemsAtLocked(pos)+amount > cap {
 			return false
 		}
@@ -8212,16 +8370,22 @@ func totalBuildingItems(b *Building) int32 {
 func (w *World) nextWaveSpacingSec() float32 {
 	rules := w.rulesMgr.Get()
 	if rules == nil {
-		return 90
+		return 120
 	}
-	// Before first triggered wave, prefer initial spacing when configured.
-	if w.wave <= 1 && rules.InitialWaveSpacing > 0 {
-		return rules.InitialWaveSpacing
+	// Vanilla Logic.play gives the first wave a 2x grace period unless an
+	// explicit initialWaveSpacing is configured.
+	if w.wave <= 1 {
+		if rules.InitialWaveSpacing > 0 {
+			return rules.InitialWaveSpacing
+		}
+		if rules.WaveSpacing > 0 {
+			return rules.WaveSpacing * 2
+		}
 	}
 	if rules.WaveSpacing > 0 {
 		return rules.WaveSpacing
 	}
-	return 90
+	return 120
 }
 
 func (w *World) Snapshot() Snapshot {
@@ -8295,10 +8459,14 @@ func (w *World) SetModel(m *WorldModel) {
 	w.incineratorStates = map[int32]float32{}
 	w.repairTurretStates = map[int32]repairTurretRuntimeState{}
 	w.repairTowerStates = map[int32]repairTowerRuntimeState{}
+	w.buildingBoostStates = map[int32]buildingBoostState{}
 	w.teamPowerStates = map[TeamID]*teamPowerState{}
 	w.teamPowerBudget = map[TeamID]float32{}
 	w.powerNetStates = map[int32]*powerNetState{}
 	w.powerNetByPos = map[int32]int32{}
+	w.powerNetIDs = nil
+	w.powerNetTeams = map[int32]TeamID{}
+	w.powerNetStorageRefs = map[int32][]powerStorageRef{}
 	w.powerNetDirty = true
 	w.powerStorageState = map[int32]float32{}
 	w.powerGeneratorState = map[int32]*powerGeneratorState{}
@@ -8380,6 +8548,8 @@ func (w *World) SetModel(m *WorldModel) {
 	w.turretTilePositions = nil
 	w.nextPlanOrder = 0
 	w.blockNamesByID = nil
+	w.blockNamesByIndex = nil
+	w.powerStorageCapacityByBlock = nil
 	w.unitNamesByID = nil
 	w.unitTypeDefsByID = nil
 	w.statusProfilesByID = map[int16]statusEffectProfile{}
@@ -8400,8 +8570,21 @@ func (w *World) SetModel(m *WorldModel) {
 
 	if m != nil && len(m.BlockNames) > 0 {
 		w.blockNamesByID = make(map[int16]string, len(m.BlockNames))
+		maxBlockID := int16(0)
+		for k := range m.BlockNames {
+			if k > maxBlockID {
+				maxBlockID = k
+			}
+		}
+		w.blockNamesByIndex = make([]string, int(maxBlockID)+1)
+		w.powerStorageCapacityByBlock = make([]float32, int(maxBlockID)+1)
 		for k, v := range m.BlockNames {
-			w.blockNamesByID[k] = strings.ToLower(strings.TrimSpace(v))
+			name := strings.ToLower(strings.TrimSpace(v))
+			w.blockNamesByID[k] = name
+			if k >= 0 {
+				w.blockNamesByIndex[int(k)] = name
+				w.powerStorageCapacityByBlock[int(k)] = powerStorageCapacityByBlockName(name)
+			}
 		}
 	}
 	if m != nil && len(m.UnitNames) > 0 {
@@ -10653,15 +10836,18 @@ func (w *World) SetEntityCommandIdle(id int32) (RawEntity, bool) {
 }
 
 func (w *World) DrainEntityEvents() []EntityEvent {
+	return w.DrainEntityEventsInto(nil)
+}
+
+func (w *World) DrainEntityEventsInto(dst []EntityEvent) []EntityEvent {
 	w.mu.Lock()
 	defer w.mu.Unlock()
 	if len(w.entityEvents) == 0 {
-		return nil
+		return dst[:0]
 	}
-	out := make([]EntityEvent, len(w.entityEvents))
-	copy(out, w.entityEvents)
+	dst = append(dst[:0], w.entityEvents...)
 	w.entityEvents = w.entityEvents[:0]
-	return out
+	return dst
 }
 
 func (w *World) stepEntities(delta time.Duration) (movementDur, combatDur, buildingCombatDur, bulletDur time.Duration) {
@@ -11172,23 +11358,30 @@ func (w *World) stepBuildingCombat(dt float32, idToIndex map[int32]int, spatial 
 			state.TurretRotation = float32(t.Rotation) * 90
 			state.HasRotation = true
 		}
-		state = w.regenBuildState(pos, t, state, prof, t.Build.Team, dt)
+		scaledDT := dt * w.buildingTimeScaleLocked(pos)
+		state = w.regenBuildState(pos, t, state, prof, t.Build.Team, scaledDT)
 		if state.Cooldown > 0 {
-			state.Cooldown -= dt
+			state.Cooldown -= scaledDT
 			if state.Cooldown < 0 {
 				state.Cooldown = 0
 			}
 		}
 		if state.BurstDelay > 0 {
-			state.BurstDelay -= dt
+			state.BurstDelay -= scaledDT
 			if state.BurstDelay < 0 {
 				state.BurstDelay = 0
 			}
 		}
 		if state.RetargetCD > 0 {
-			state.RetargetCD -= dt
+			state.RetargetCD -= scaledDT
 			if state.RetargetCD < 0 {
 				state.RetargetCD = 0
+			}
+		}
+		if state.BuildTargetCD > 0 {
+			state.BuildTargetCD -= scaledDT
+			if state.BuildTargetCD < 0 {
+				state.BuildTargetCD = 0
 			}
 		}
 
@@ -11256,7 +11449,7 @@ func (w *World) stepBuildingCombat(dt float32, idToIndex map[int32]int, spatial 
 		if controlled {
 			targetX, targetY = aimX, aimY
 			hasAim = true
-			targetRotation = updateBuildingAim(t, src, prof, &state, targetX, targetY, dt)
+			targetRotation = updateBuildingAim(t, src, prof, &state, targetX, targetY, scaledDT)
 			src.Rotation = state.TurretRotation
 		} else {
 			targetIdx, targetBuildPos, targetX, targetY = w.acquireBuildingWeaponTarget(src, &state, prof, ents, idToIndex, spatial, teamSpatial)
@@ -11265,13 +11458,13 @@ func (w *World) stepBuildingCombat(dt float32, idToIndex map[int32]int, spatial 
 				targetX, targetY = predictBuildingAimPosition(src, ents[targetIdx], prof)
 			}
 			if hasAim {
-				targetRotation = updateBuildingAim(t, src, prof, &state, targetX, targetY, dt)
+				targetRotation = updateBuildingAim(t, src, prof, &state, targetX, targetY, scaledDT)
 				src.Rotation = state.TurretRotation
 			}
 		}
 
 		if prof.ContinuousHold && isPersistentBeamBulletProfile(prof.Bullet) {
-			if w.stepBuildingContinuousBeam(pos, &src, &state, prof, ents, idToIndex, spatial, teamSpatial, dt) {
+			if w.stepBuildingContinuousBeam(pos, &src, &state, prof, ents, idToIndex, spatial, teamSpatial, scaledDT) {
 				state.TurretRotation = src.Rotation
 				state.HasRotation = true
 			}
@@ -11312,8 +11505,27 @@ func (w *World) buildingUsesItemAmmoLocked(tile *Tile, prof buildingWeaponProfil
 	if w == nil || tile == nil || tile.Build == nil {
 		return false
 	}
-	name := strings.ToLower(strings.TrimSpace(w.blockNameByID(int16(tile.Build.Block))))
+	name := w.blockNameByID(int16(tile.Build.Block))
 	return classifyTurretBlockSyncKind(name, prof) == blockSyncItemTurret
+}
+
+func (w *World) buildingWeaponProfileByNameLocked(name string) (buildingWeaponProfile, bool) {
+	if w == nil || name == "" {
+		return buildingWeaponProfile{}, false
+	}
+	src := w.buildingProfilesByName
+	if len(src) == 0 {
+		src = buildingWeaponProfilesByName
+	}
+	if prof, ok := src[name]; ok {
+		return prof, true
+	}
+	normalized := strings.ToLower(strings.TrimSpace(name))
+	if normalized == "" || normalized == name {
+		return buildingWeaponProfile{}, false
+	}
+	prof, ok := src[normalized]
+	return prof, ok
 }
 
 func (w *World) buildingHidesInventoryItemsLocked(pos int32, tile *Tile) bool {
@@ -11329,7 +11541,7 @@ func (w *World) resolveBuildingWeaponProfileLocked(tile *Tile, prof buildingWeap
 	if w == nil || tile == nil || tile.Build == nil {
 		return prof
 	}
-	name := strings.ToLower(strings.TrimSpace(w.blockNameByID(int16(tile.Build.Block))))
+	name := w.blockNameByID(int16(tile.Build.Block))
 	if ammoByItem, ok := turretItemAmmoBulletTypesByName[name]; ok {
 		if ammoItem, ok := w.currentBuildingAmmoItemLocked(tile, prof); ok {
 			if bulletType, exists := ammoByItem[ammoItem]; exists && bulletType > 0 {
@@ -11361,7 +11573,7 @@ func (w *World) buildingAcceptsAmmoItemLocked(tile *Tile, prof buildingWeaponPro
 	if w == nil || tile == nil || tile.Build == nil {
 		return false
 	}
-	name := strings.ToLower(strings.TrimSpace(w.blockNameByID(int16(tile.Build.Block))))
+	name := w.blockNameByID(int16(tile.Build.Block))
 	ammoByItem, ok := turretItemAmmoBulletTypesByName[name]
 	if !ok {
 		return true
@@ -12179,17 +12391,11 @@ func (w *World) applyDamageToEntity(e *RawEntity, dmg float32) {
 }
 
 func (w *World) getBuildingWeaponProfile(blockID int16) (buildingWeaponProfile, bool) {
-	name, ok := w.blockNamesByID[blockID]
-	if !ok {
+	name := w.blockNameByID(blockID)
+	if name == "" {
 		return buildingWeaponProfile{}, false
 	}
-	name = strings.ToLower(strings.TrimSpace(name))
-	src := w.buildingProfilesByName
-	if len(src) == 0 {
-		src = buildingWeaponProfilesByName
-	}
-	p, ok := src[name]
-	return p, ok
+	return w.buildingWeaponProfileByNameLocked(name)
 }
 
 func (w *World) findNearestEnemyBuilding(src RawEntity, rangeLimit float32) (int32, float32, float32, bool) {
@@ -12250,6 +12456,7 @@ func (w *World) applyDamageToBuildingRaw(pos int32, damage float32) bool {
 		return false
 	}
 	prevBlock := int16(t.Block)
+	prevBlockName := w.blockNameByID(prevBlock)
 	t.Build.Health -= damage
 	if t.Build.Health > 0 {
 		w.entityEvents = append(w.entityEvents, EntityEvent{
@@ -12271,7 +12478,9 @@ func (w *World) applyDamageToBuildingRaw(pos int32, damage float32) bool {
 	if powerRelevant {
 		w.invalidatePowerNetsLocked()
 	}
-	w.refreshCoreStorageLinksLocked()
+	if affectsCoreStorageLinks(prevBlockName) {
+		w.refreshCoreStorageLinksLocked()
+	}
 	w.entityEvents = append(w.entityEvents, EntityEvent{
 		Kind:       EntityEventBuildDestroyed,
 		BuildPos:   packTilePos(x, y),
@@ -12326,11 +12535,19 @@ func (w *World) acquireTrackedEntityTarget(
 	}
 	tid, ok := findNearestEnemyEntity(src, ents, spatial, teamSpatial, rangeLimit, allowAir, allowGround, priority)
 	if !ok {
+		state.RetargetCD = emptyTargetRetargetDelay(retargetDelay)
 		return 0, false
 	}
 	state.TargetID = tid
 	state.RetargetCD = maxf(retargetDelay, 0.1)
 	return tid, true
+}
+
+func emptyTargetRetargetDelay(retargetDelay float32) float32 {
+	if retargetDelay <= 0 {
+		return 0.12
+	}
+	return clampf(retargetDelay*0.5, 0.08, 0.25)
 }
 
 func findEntityIndexByID(ents []RawEntity, idToIndex map[int32]int, id int32) (int, bool) {
@@ -12660,17 +12877,8 @@ func canTargetEntity(e RawEntity, allowAir, allowGround bool) bool {
 	return allowGround
 }
 
-// Approximate flying type set for current compact type-id space.
 func isEntityFlying(e RawEntity) bool {
-	if e.Flying {
-		return true
-	}
-	switch e.TypeID {
-	case 5, 7, 9, 11, 13, 15:
-		return true
-	default:
-		return false
-	}
+	return e.Flying
 }
 
 func entityHitRadiusForType(typeID int16) float32 {

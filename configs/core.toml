@@ -4,6 +4,10 @@
 dual_core_enabled = true
 tps = 120
 
+[runtime]
+cores = 6
+scheduler_enabled = true
+
 [memory]
 check_interval_sec = 5
 free_os_memory = false

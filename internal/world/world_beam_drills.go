@@ -2,6 +2,12 @@ package world
 
 import "time"
 
+type beamDrillScanSample struct {
+	item     ItemID
+	facings  []beamDrillFacing
+	multiple bool
+}
+
 type beamDrillProfile struct {
 	Tier                   int
 	DrillTimeFrames        float32
@@ -46,16 +52,35 @@ type beamDrillFacing struct {
 	count int
 }
 
-func (w *World) stepBeamDrillProduction(delta time.Duration) {
+func (w *World) stepBeamDrillProduction(delta time.Duration) time.Duration {
 	if w == nil || w.model == nil {
-		return
+		return 0
 	}
 	deltaFrames := float32(delta.Seconds() * 60)
 	deltaSeconds := float32(delta.Seconds())
 	if deltaFrames <= 0 || deltaSeconds <= 0 {
-		return
+		return 0
 	}
-	for _, pos := range w.beamDrillTilePositions {
+	samples := make([]beamDrillScanSample, len(w.beamDrillTilePositions))
+	dispatch := w.parallelizeRanges(len(w.beamDrillTilePositions), func(_ int, start, end int) {
+		for i := start; i < end; i++ {
+			pos := w.beamDrillTilePositions[i]
+			if pos < 0 || int(pos) >= len(w.model.Tiles) {
+				continue
+			}
+			tile := &w.model.Tiles[pos]
+			if tile.Build == nil || tile.Build.Team == 0 || tile.Block == 0 {
+				continue
+			}
+			prof, ok := beamDrillProfilesByBlockName[w.blockNameByID(int16(tile.Block))]
+			if !ok {
+				continue
+			}
+			item, facings, multiple := w.scanBeamDrillFacingLocked(tile, prof)
+			samples[i] = beamDrillScanSample{item: item, facings: facings, multiple: multiple}
+		}
+	})
+	for i, pos := range w.beamDrillTilePositions {
 		if pos < 0 || int(pos) >= len(w.model.Tiles) {
 			continue
 		}
@@ -69,20 +94,21 @@ func (w *World) stepBeamDrillProduction(delta time.Duration) {
 			continue
 		}
 		state := w.beamDrillStates[pos]
-		w.stepSingleBeamDrillLocked(pos, tile, prof, &state, deltaFrames, deltaSeconds)
+		w.stepSingleBeamDrillLocked(pos, tile, prof, &state, samples[i], deltaFrames, deltaSeconds)
 		w.beamDrillStates[pos] = state
 	}
+	return dispatch.DispatchDuration
 }
 
-func (w *World) stepSingleBeamDrillLocked(pos int32, tile *Tile, prof beamDrillProfile, state *beamDrillRuntimeState, deltaFrames, deltaSeconds float32) {
+func (w *World) stepSingleBeamDrillLocked(pos int32, tile *Tile, prof beamDrillProfile, state *beamDrillRuntimeState, sample beamDrillScanSample, deltaFrames, deltaSeconds float32) {
 	if tile == nil || tile.Build == nil || state == nil {
 		return
 	}
+	deltaFrames, deltaSeconds = w.scaledBuildingDeltaLocked(pos, deltaFrames, deltaSeconds)
 	if item, exists := firstBuildingItem(tile.Build); exists {
 		_ = w.dumpSingleItemLocked(pos, tile, &item, nil)
 	}
-	item, facings, multiple := w.scanBeamDrillFacingLocked(tile, prof)
-	if multiple || item == 0 || len(facings) == 0 || totalBuildingItems(tile.Build) >= w.itemCapacityForBlockLocked(tile) {
+	if sample.multiple || sample.item == 0 || len(sample.facings) == 0 || totalBuildingItems(tile.Build) >= w.itemCapacityForBlockLocked(tile) {
 		state.Warmup = approachf(state.Warmup, 0, deltaFrames/60.0)
 		return
 	}
@@ -104,7 +130,7 @@ func (w *World) stepSingleBeamDrillLocked(pos int32, tile *Tile, prof beamDrillP
 	}
 
 	drillTime := prof.DrillTimeFrames
-	if mul := prof.DrillMultipliers[item]; mul > 0 {
+	if mul := prof.DrillMultipliers[sample.item]; mul > 0 {
 		drillTime /= mul
 	}
 	if drillTime <= 0 {
@@ -116,7 +142,7 @@ func (w *World) stepSingleBeamDrillLocked(pos int32, tile *Tile, prof beamDrillP
 		return
 	}
 	state.Time = float32mod(state.Time, drillTime)
-	for _, facing := range facings {
+	for _, facing := range sample.facings {
 		for i := 0; i < facing.count; i++ {
 			if !w.offloadProducedItemLocked(pos, tile, facing.item) {
 				break

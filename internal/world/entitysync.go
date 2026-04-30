@@ -48,18 +48,38 @@ func (w *World) EntitySyncSnapshots(content *protocol.ContentRegistry, playerUni
 		return nil
 	}
 
-	entities := make([]RawEntity, 0, len(w.model.Entities))
-	for _, src := range w.model.Entities {
-		if src.ID == 0 || src.TypeID <= 0 || src.Health <= 0 {
-			continue
+	partitions := 1
+	if w.scheduler != nil {
+		partitions = w.scheduler.PartitionCount(len(w.model.Entities))
+		if partitions <= 0 {
+			partitions = 1
 		}
-		if _, skip := playerUnits[src.ID]; skip {
-			continue
+	}
+	parts := make([][]RawEntity, partitions)
+	w.parallelizeRanges(len(w.model.Entities), func(partitionID, start, end int) {
+		local := make([]RawEntity, 0, end-start)
+		for i := start; i < end; i++ {
+			src := w.model.Entities[i]
+			if src.ID == 0 || src.TypeID <= 0 || src.Health <= 0 {
+				continue
+			}
+			if _, skip := playerUnits[src.ID]; skip {
+				continue
+			}
+			if content != nil && content.UnitType(src.TypeID) == nil {
+				continue
+			}
+			local = append(local, cloneRawEntity(src))
 		}
-		if content != nil && content.UnitType(src.TypeID) == nil {
-			continue
-		}
-		entities = append(entities, cloneRawEntity(src))
+		parts[partitionID] = local
+	})
+	total := 0
+	for _, local := range parts {
+		total += len(local)
+	}
+	entities := make([]RawEntity, 0, total)
+	for _, local := range parts {
+		entities = append(entities, local...)
 	}
 	sort.Slice(entities, func(i, j int) bool {
 		return entities[i].ID < entities[j].ID

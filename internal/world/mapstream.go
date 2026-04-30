@@ -2,7 +2,6 @@ package world
 
 import (
 	"sort"
-	"strings"
 
 	"mdt-server/internal/protocol"
 )
@@ -78,7 +77,7 @@ func (w *World) hasLiveMapStreamPayloadLocked(pos int32, tile *Tile) bool {
 	if w == nil || tile == nil || tile.Build == nil || tile.Block == 0 {
 		return false
 	}
-	name := strings.ToLower(strings.TrimSpace(w.blockNameByID(int16(tile.Block))))
+	name := w.blockNameByID(int16(tile.Block))
 	if _, _, ok := w.encodeSpecialMapStreamBuildingPayloadLocked(pos, tile, name); ok {
 		return true
 	}
@@ -102,7 +101,7 @@ func (w *World) encodeMapStreamBuildingPayloadLocked(pos int32, tile *Tile) (byt
 	if w == nil || tile == nil || tile.Build == nil || tile.Block == 0 {
 		return 0, nil, false
 	}
-	name := strings.ToLower(strings.TrimSpace(w.blockNameByID(int16(tile.Block))))
+	name := w.blockNameByID(int16(tile.Block))
 	if revision, payload, ok := w.encodeSpecialMapStreamBuildingPayloadLocked(pos, tile, name); ok {
 		return revision, payload, true
 	}
@@ -457,7 +456,7 @@ func (w *World) encodeSpecialMapStreamBuildingPayloadLocked(pos int32, tile *Til
 
 func (w *World) encodeItemSourceMapStreamPayloadLocked(pos int32, tile *Tile) ([]byte, bool) {
 	writer := protocol.NewWriter()
-	name := strings.ToLower(strings.TrimSpace(w.blockNameByID(int16(tile.Block))))
+	name := w.blockNameByID(int16(tile.Block))
 	if err := w.writeBlockBaseSyncLocked(writer, pos, tile, name, blockSyncBaseOnly); err != nil {
 		return nil, false
 	}
@@ -473,7 +472,7 @@ func (w *World) encodeItemSourceMapStreamPayloadLocked(pos int32, tile *Tile) ([
 
 func (w *World) encodeLiquidSourceMapStreamPayloadLocked(pos int32, tile *Tile) ([]byte, bool) {
 	writer := protocol.NewWriter()
-	name := strings.ToLower(strings.TrimSpace(w.blockNameByID(int16(tile.Block))))
+	name := w.blockNameByID(int16(tile.Block))
 	if err := w.writeBlockBaseSyncLocked(writer, pos, tile, name, blockSyncBaseOnly); err != nil {
 		return nil, false
 	}
@@ -489,7 +488,7 @@ func (w *World) encodeLiquidSourceMapStreamPayloadLocked(pos int32, tile *Tile) 
 
 func (w *World) encodeDuctMapStreamPayloadLocked(pos int32, tile *Tile) ([]byte, bool) {
 	writer := protocol.NewWriter()
-	name := strings.ToLower(strings.TrimSpace(w.blockNameByID(int16(tile.Block))))
+	name := w.blockNameByID(int16(tile.Block))
 	if err := w.writeBlockBaseSyncLocked(writer, pos, tile, name, blockSyncNone); err != nil {
 		return nil, false
 	}
@@ -502,7 +501,7 @@ func (w *World) encodeDuctMapStreamPayloadLocked(pos int32, tile *Tile) ([]byte,
 
 func (w *World) encodeDuctRouterMapStreamPayloadLocked(pos int32, tile *Tile) ([]byte, bool) {
 	writer := protocol.NewWriter()
-	name := strings.ToLower(strings.TrimSpace(w.blockNameByID(int16(tile.Block))))
+	name := w.blockNameByID(int16(tile.Block))
 	if err := w.writeBlockBaseSyncLocked(writer, pos, tile, name, blockSyncNone); err != nil {
 		return nil, false
 	}
@@ -518,7 +517,7 @@ func (w *World) encodeDuctRouterMapStreamPayloadLocked(pos int32, tile *Tile) ([
 
 func (w *World) encodeSorterMapStreamPayloadLocked(pos int32, tile *Tile) ([]byte, bool) {
 	writer := protocol.NewWriter()
-	name := strings.ToLower(strings.TrimSpace(w.blockNameByID(int16(tile.Block))))
+	name := w.blockNameByID(int16(tile.Block))
 	if err := w.writeBlockBaseSyncLocked(writer, pos, tile, name, blockSyncBaseOnly); err != nil {
 		return nil, false
 	}
@@ -534,7 +533,7 @@ func (w *World) encodeSorterMapStreamPayloadLocked(pos int32, tile *Tile) ([]byt
 
 func (w *World) encodeOverflowGateMapStreamPayloadLocked(pos int32, tile *Tile) ([]byte, bool) {
 	writer := protocol.NewWriter()
-	name := strings.ToLower(strings.TrimSpace(w.blockNameByID(int16(tile.Block))))
+	name := w.blockNameByID(int16(tile.Block))
 	if err := w.writeBlockBaseSyncLocked(writer, pos, tile, name, blockSyncBaseOnly); err != nil {
 		return nil, false
 	}
@@ -543,7 +542,7 @@ func (w *World) encodeOverflowGateMapStreamPayloadLocked(pos int32, tile *Tile) 
 
 func (w *World) encodeItemBridgeMapStreamPayloadLocked(pos int32, tile *Tile) ([]byte, bool) {
 	writer := protocol.NewWriter()
-	name := strings.ToLower(strings.TrimSpace(w.blockNameByID(int16(tile.Block))))
+	name := w.blockNameByID(int16(tile.Block))
 	if err := w.writeBlockBaseSyncLocked(writer, pos, tile, name, blockSyncBaseOnly); err != nil {
 		return nil, false
 	}
@@ -612,12 +611,12 @@ func (w *World) writeOfficialPayloadValueLocked(writer *protocol.Writer, payload
 
 func (w *World) encodePayloadConveyorMapStreamPayloadLocked(pos int32, tile *Tile) ([]byte, bool) {
 	writer := protocol.NewWriter()
-	if err := w.writeBlockBaseSyncLocked(writer, pos, tile, strings.ToLower(strings.TrimSpace(w.blockNameByID(int16(tile.Block)))), blockSyncNone); err != nil {
+	if err := w.writeBlockBaseSyncLocked(writer, pos, tile, w.blockNameByID(int16(tile.Block)), blockSyncNone); err != nil {
 		return nil, false
 	}
 	st := w.payloadStateLocked(pos)
 	payRotation := payloadRotationDegrees(st.Payload, tile.Rotation)
-	moveTime := payloadMoveTimeByName(strings.ToLower(strings.TrimSpace(w.blockNameByID(int16(tile.Block)))))
+	moveTime := payloadMoveTimeByName(w.blockNameByID(int16(tile.Block)))
 	if moveTime <= 0 {
 		moveTime = 1
 	}
@@ -663,7 +662,7 @@ func (w *World) encodePayloadRouterMapStreamPayloadLocked(pos int32, tile *Tile)
 
 func (w *World) encodePayloadLoaderMapStreamPayloadLocked(pos int32, tile *Tile) ([]byte, bool) {
 	writer := protocol.NewWriter()
-	if err := w.writeBlockBaseSyncLocked(writer, pos, tile, strings.ToLower(strings.TrimSpace(w.blockNameByID(int16(tile.Block)))), blockSyncNone); err != nil {
+	if err := w.writeBlockBaseSyncLocked(writer, pos, tile, w.blockNameByID(int16(tile.Block)), blockSyncNone); err != nil {
 		return nil, false
 	}
 	st := w.payloadStateLocked(pos)
@@ -688,7 +687,7 @@ func (w *World) encodePayloadLoaderMapStreamPayloadLocked(pos int32, tile *Tile)
 
 func (w *World) encodePayloadMassDriverMapStreamPayloadLocked(pos int32, tile *Tile) ([]byte, bool) {
 	writer := protocol.NewWriter()
-	if err := w.writeBlockBaseSyncLocked(writer, pos, tile, strings.ToLower(strings.TrimSpace(w.blockNameByID(int16(tile.Block)))), blockSyncNone); err != nil {
+	if err := w.writeBlockBaseSyncLocked(writer, pos, tile, w.blockNameByID(int16(tile.Block)), blockSyncNone); err != nil {
 		return nil, false
 	}
 	st := w.payloadStateLocked(pos)
@@ -747,7 +746,7 @@ func (w *World) encodePayloadMassDriverMapStreamPayloadLocked(pos int32, tile *T
 
 func (w *World) encodePayloadVoidMapStreamPayloadLocked(pos int32, tile *Tile) ([]byte, bool) {
 	writer := protocol.NewWriter()
-	if err := w.writeBlockBaseSyncLocked(writer, pos, tile, strings.ToLower(strings.TrimSpace(w.blockNameByID(int16(tile.Block)))), blockSyncNone); err != nil {
+	if err := w.writeBlockBaseSyncLocked(writer, pos, tile, w.blockNameByID(int16(tile.Block)), blockSyncNone); err != nil {
 		return nil, false
 	}
 	st := w.payloadStateLocked(pos)
@@ -769,7 +768,7 @@ func (w *World) encodePayloadVoidMapStreamPayloadLocked(pos int32, tile *Tile) (
 
 func (w *World) encodePayloadDeconstructorMapStreamPayloadLocked(pos int32, tile *Tile) ([]byte, bool) {
 	writer := protocol.NewWriter()
-	if err := w.writeBlockBaseSyncLocked(writer, pos, tile, strings.ToLower(strings.TrimSpace(w.blockNameByID(int16(tile.Block)))), blockSyncNone); err != nil {
+	if err := w.writeBlockBaseSyncLocked(writer, pos, tile, w.blockNameByID(int16(tile.Block)), blockSyncNone); err != nil {
 		return nil, false
 	}
 	st := w.payloadStateLocked(pos)

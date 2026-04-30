@@ -100,7 +100,7 @@ func (w *World) buildAICoreSpawnUnitTypeIDLocked(tile *Tile) (int16, bool) {
 	if w == nil || tile == nil || tile.Block == 0 {
 		return 0, false
 	}
-	name := strings.ToLower(strings.TrimSpace(w.blockNameByID(int16(tile.Block))))
+	name := w.blockNameByID(int16(tile.Block))
 	switch {
 	case strings.Contains(name, "core-shard"):
 		return w.resolveUnitTypeIDLocked("alpha")

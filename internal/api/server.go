@@ -224,6 +224,12 @@ func (s *Server) handleStatus(w http.ResponseWriter, _ *http.Request) {
 			"by_type_sent":  byTypeSent,
 			"by_type_bytes": byTypeBytes,
 		},
+		"entity_snapshot_cache": map[string]any{
+			"hits":                s.srv.EntitySnapshotCacheStats().Hits,
+			"misses":              s.srv.EntitySnapshotCacheStats().Misses,
+			"last_build_ms":       s.srv.EntitySnapshotCacheStats().LastBuildDuration.Milliseconds(),
+			"last_filter_ms":      s.srv.EntitySnapshotCacheStats().LastFilterDuration.Milliseconds(),
+		},
 	}
 	if s.engine != nil {
 		if stats := s.engine(); stats != nil {
@@ -234,6 +240,10 @@ func (s *Server) handleStatus(w http.ResponseWriter, _ *http.Request) {
 			resp["overrun"] = stats.Overrun
 			resp["partitions"] = stats.Partitions
 			resp["total_work"] = stats.TotalWork
+			resp["worker_count"] = stats.WorkerCount
+			resp["last_dispatch_ms"] = stats.LastDispatch.DispatchDuration.Milliseconds()
+			resp["last_dispatch_busy_ms"] = stats.LastDispatch.WorkDuration.Milliseconds()
+			resp["last_dispatch_idle_ms"] = stats.LastDispatch.IdleDuration.Milliseconds()
 		}
 	}
 	writeJSON(w, http.StatusOK, resp)

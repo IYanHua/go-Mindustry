@@ -129,10 +129,11 @@ func (w *World) stepFactoryProduction(delta time.Duration) {
 		}
 		st.UnitType = typeID
 
+		scaledFrames, scaledSeconds := w.scaledBuildingDeltaLocked(pos, deltaFrames, deltaSeconds)
 		scaledCost := w.unitFactoryScaledCostLocked(t.Team, plan.Cost)
 		speedMul := w.unitBuildSpeedMultiplierLocked(t.Team, rules)
-		if speedMul > 0 && hasRequiredItemsLocked(t.Build, scaledCost) && w.requirePowerAtLocked(pos, t.Team, 1.2*deltaSeconds) {
-			st.Progress += deltaFrames * speedMul
+		if speedMul > 0 && hasRequiredItemsLocked(t.Build, scaledCost) && w.requirePowerAtLocked(pos, t.Team, 1.2*scaledSeconds) {
+			st.Progress += scaledFrames * speedMul
 		}
 		if st.Progress >= plan.TimeFrames {
 			payload := w.newFactoryUnitPayloadLocked(t, st)
@@ -618,10 +619,18 @@ func (w *World) consumeProductionCost(team TeamID, cost []ItemStack) bool {
 }
 
 func (w *World) blockNameByID(blockID int16) string {
-	if blockID <= 0 || len(w.blockNamesByID) == 0 {
+	if blockID <= 0 {
 		return ""
 	}
-	return strings.ToLower(strings.TrimSpace(w.blockNamesByID[blockID]))
+	if idx := int(blockID); idx < len(w.blockNamesByIndex) {
+		if name := w.blockNamesByIndex[idx]; name != "" {
+			return name
+		}
+	}
+	if len(w.blockNamesByID) == 0 {
+		return ""
+	}
+	return w.blockNamesByID[blockID]
 }
 
 func (w *World) ensureTeamInventory(team TeamID) {
