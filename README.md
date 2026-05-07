@@ -138,8 +138,10 @@ mdt-server/
 ├── configs/                 # 运行配置文件
 ├── data/                    # 运行时数据、快照、状态、vanilla 数据
 ├── internal/                # 内部实现
+├── custom_plugin            # 扩展插件子模块
 ├── mods/                    # 扩展脚本目录
 ├── go.mod
+├── go.work
 ├── Makefile
 └── README.md
 ```
@@ -151,7 +153,14 @@ mdt-server/
 - 当前服务端只接受 Mindustry `build 157`
 - HTTP API 相关能力建议从 `configs/api.toml` 开始配置
 - 扩展脚本和 mods 相关内容可以放在 `mods` 目录中维护
-
+## 扩展插件开发
+- 扩展插件以子模块构建，生成在mods/*.plugin
+- 必须是plugin为后缀才能加载
+- 目前只适用于Linux/macOS平台
+```bash
+#Linux
+go build -buildmode=plugin -o mods/main.plugin ./custom_plugin/
+```
 ## 月月岛科技
 
 本项目由月月岛科技相关项目维护。更多信息请查看：
