@@ -3,7 +3,7 @@ package entity
 import (
 	"math"
 
-	"mdt-server/internal/world"
+	"github.com/IYanHua/mdt-server/internal/world"
 )
 
 // Vector2 2D vector

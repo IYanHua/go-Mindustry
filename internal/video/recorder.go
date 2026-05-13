@@ -18,7 +18,7 @@ import (
 	"golang.org/x/image/font/opentype"
 	"golang.org/x/image/math/fixed"
 
-	"mdt-server/internal/world"
+	"github.com/IYanHua/mdt-server/internal/world"
 )
 
 const worldUnitsPerTile = 8.0

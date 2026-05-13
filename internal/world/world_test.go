@@ -7,8 +7,8 @@ import (
 	"testing"
 	"time"
 
-	"mdt-server/internal/protocol"
-	"mdt-server/internal/vanilla"
+	"github.com/IYanHua/mdt-server/internal/protocol"
+	"github.com/IYanHua/mdt-server/internal/vanilla"
 )
 
 type decodedBlockSyncBase struct {

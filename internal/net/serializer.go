@@ -9,7 +9,7 @@ import (
 
 	"github.com/pierrec/lz4/v4"
 
-	"mdt-server/internal/protocol"
+	"github.com/IYanHua/mdt-server/internal/protocol"
 )
 
 var (

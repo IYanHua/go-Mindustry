@@ -6,7 +6,7 @@ import (
 	"fmt"
 	"strconv"
 
-	"mdt-server/internal/world"
+	"github.com/IYanHua/mdt-server/internal/world"
 )
 
 // BuildWorldStreamFromModel builds a join-world payload from the in-memory world model.

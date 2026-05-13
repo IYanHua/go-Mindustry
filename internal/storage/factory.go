@@ -4,7 +4,7 @@ import (
 	"fmt"
 	"strings"
 
-	"mdt-server/internal/config"
+	"github.com/IYanHua/mdt-server/internal/config"
 )
 
 func NewRecorder(cfg config.StorageConfig) (Recorder, error) {

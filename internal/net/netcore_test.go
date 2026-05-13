@@ -5,8 +5,8 @@ import (
 	"testing"
 	"time"
 
-	"mdt-server/internal/core"
-	"mdt-server/internal/protocol"
+	"github.com/IYanHua/mdt-server/internal/core"
+	"github.com/IYanHua/mdt-server/internal/protocol"
 )
 
 func TestNetworkCoreBroadcastToTeamFiltersRecipients(t *testing.T) {

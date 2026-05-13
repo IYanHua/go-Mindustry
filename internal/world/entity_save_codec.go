@@ -1,6 +1,6 @@
 package world
 
-import "mdt-server/internal/protocol"
+import "github.com/IYanHua/mdt-server/internal/protocol"
 
 func decodeRawUnitPayloadEntity(raw []byte, classID byte) (*RawEntity, bool) {
 	if len(raw) == 0 {

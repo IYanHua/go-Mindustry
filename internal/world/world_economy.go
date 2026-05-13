@@ -5,7 +5,7 @@ import (
 	"strings"
 	"time"
 
-	"mdt-server/internal/protocol"
+	"github.com/IYanHua/mdt-server/internal/protocol"
 )
 
 const unlimitedUnitCap = int32(^uint32(0) >> 1)

@@ -1,6 +1,6 @@
 package world
 
-import "mdt-server/internal/sim"
+import "github.com/IYanHua/mdt-server/internal/sim"
 
 type worldDispatcher interface {
 	Dispatch(totalWork int, fn sim.DispatchFunc) sim.DispatchStats

@@ -11,8 +11,8 @@ import (
 	"testing"
 	"time"
 
-	"mdt-server/internal/config"
-	"mdt-server/internal/persist"
+	"github.com/IYanHua/mdt-server/internal/config"
+	"github.com/IYanHua/mdt-server/internal/persist"
 )
 
 func waitForIPCConn(t *testing.T, endpoint string, done <-chan error) net.Conn {

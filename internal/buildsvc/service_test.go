@@ -3,8 +3,8 @@ package buildsvc
 import (
 	"testing"
 
-	"mdt-server/internal/protocol"
-	"mdt-server/internal/world"
+	"github.com/IYanHua/mdt-server/internal/protocol"
+	"github.com/IYanHua/mdt-server/internal/world"
 )
 
 func newBuildSvcTestWorld(t *testing.T) *world.World {

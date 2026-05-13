@@ -4,7 +4,7 @@ import (
 	"testing"
 	"time"
 
-	"mdt-server/internal/protocol"
+	"github.com/IYanHua/mdt-server/internal/protocol"
 )
 
 func primeAssistConstructBuilder(t *testing.T, w *World, leader RawEntity, op BuildPlanOp) {

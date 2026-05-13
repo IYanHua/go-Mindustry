@@ -4,7 +4,7 @@ import (
 	"errors"
 	"fmt"
 
-	"mdt-server/internal/protocol"
+	"github.com/IYanHua/mdt-server/internal/protocol"
 )
 
 var (

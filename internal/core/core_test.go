@@ -10,10 +10,10 @@ import (
 	"testing"
 	"time"
 
-	"mdt-server/internal/config"
-	"mdt-server/internal/persist"
-	"mdt-server/internal/protocol"
-	"mdt-server/internal/storage"
+	"github.com/IYanHua/mdt-server/internal/config"
+	"github.com/IYanHua/mdt-server/internal/persist"
+	"github.com/IYanHua/mdt-server/internal/protocol"
+	"github.com/IYanHua/mdt-server/internal/storage"
 )
 
 type testRecorder struct {

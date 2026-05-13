@@ -4,7 +4,7 @@ import (
 	"sort"
 	"strings"
 
-	"mdt-server/internal/protocol"
+	"github.com/IYanHua/mdt-server/internal/protocol"
 )
 
 type entitySyncStatusEffect struct {

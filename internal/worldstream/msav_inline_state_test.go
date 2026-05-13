@@ -6,8 +6,8 @@ import (
 	"testing"
 	"time"
 
-	"mdt-server/internal/protocol"
-	"mdt-server/internal/world"
+	"github.com/IYanHua/mdt-server/internal/protocol"
+	"github.com/IYanHua/mdt-server/internal/world"
 )
 
 func placeInlineConfigHydrationTestTile(t *testing.T, model *world.WorldModel, x, y int, blockID int16, name string) *world.Tile {

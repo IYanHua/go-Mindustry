@@ -6,8 +6,8 @@ import (
 	"sort"
 	"strings"
 
-	"mdt-server/internal/protocol"
-	"mdt-server/internal/world"
+	"github.com/IYanHua/mdt-server/internal/protocol"
+	"github.com/IYanHua/mdt-server/internal/world"
 )
 
 // LoadWorldModelFromMSAV decodes the map chunk into a WorldModel.

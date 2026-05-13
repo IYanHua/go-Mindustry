@@ -1,4 +1,4 @@
-module mdt-server
+module github.com/IYanHua/mdt-server
 
 go 1.22
 

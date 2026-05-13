@@ -6,9 +6,9 @@ import (
 	"strings"
 	"testing"
 
-	"mdt-server/internal/protocol"
-	"mdt-server/internal/world"
-	"mdt-server/internal/worldstream"
+	"github.com/IYanHua/mdt-server/internal/protocol"
+	"github.com/IYanHua/mdt-server/internal/world"
+	"github.com/IYanHua/mdt-server/internal/worldstream"
 )
 
 func TestBuildSyncSnapshotFromModelUsesBuildTeamWhenPresent(t *testing.T) {

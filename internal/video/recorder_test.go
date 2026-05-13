@@ -10,7 +10,7 @@ import (
 	"golang.org/x/image/font"
 	"golang.org/x/image/font/basicfont"
 
-	"mdt-server/internal/world"
+	"github.com/IYanHua/mdt-server/internal/world"
 )
 
 func TestComputeRenderLayoutFitsWorldIntoCanvas(t *testing.T) {

@@ -5,7 +5,7 @@ import (
 	"testing"
 	"time"
 
-	"mdt-server/internal/protocol"
+	"github.com/IYanHua/mdt-server/internal/protocol"
 )
 
 func stepWorldFrames(w *World, frames int) {

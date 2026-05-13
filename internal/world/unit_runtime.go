@@ -1,6 +1,6 @@
 package world
 
-import "mdt-server/internal/protocol"
+import "github.com/IYanHua/mdt-server/internal/protocol"
 
 const invalidEntityTilePos int32 = -1
 

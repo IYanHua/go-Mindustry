@@ -10,10 +10,10 @@ import (
 	"sync/atomic"
 	"time"
 
-	"mdt-server/internal/config"
-	"mdt-server/internal/persist"
-	"mdt-server/internal/storage"
-	"mdt-server/internal/worldstream"
+	"github.com/IYanHua/mdt-server/internal/config"
+	"github.com/IYanHua/mdt-server/internal/persist"
+	"github.com/IYanHua/mdt-server/internal/storage"
+	"github.com/IYanHua/mdt-server/internal/worldstream"
 )
 
 // Core1 - Game Loop 核心（主线程）

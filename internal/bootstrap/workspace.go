@@ -9,8 +9,8 @@ import (
 	"strings"
 	"time"
 
-	mdtserver "mdt-server"
-	"mdt-server/internal/config"
+	mdtserver "github.com/IYanHua/mdt-server"
+	"github.com/IYanHua/mdt-server/internal/config"
 )
 
 type Result struct {

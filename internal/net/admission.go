@@ -9,7 +9,7 @@ import (
 	"strings"
 	"time"
 
-	"mdt-server/internal/protocol"
+	"github.com/IYanHua/mdt-server/internal/protocol"
 )
 
 const connectRejectDelay = 250 * time.Millisecond

@@ -10,7 +10,7 @@ import (
 	"strings"
 	"time"
 
-	"mdt-server/internal/storage"
+	"github.com/IYanHua/mdt-server/internal/storage"
 )
 
 type managedMod struct {

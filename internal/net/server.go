@@ -21,11 +21,11 @@ import (
 	"time"
 	"unicode/utf8"
 
-	"mdt-server/internal/devlog"
-	"mdt-server/internal/protocol"
-	"mdt-server/internal/runtimeassets"
-	"mdt-server/internal/storage"
-	"mdt-server/internal/worldstream"
+	"github.com/IYanHua/mdt-server/internal/devlog"
+	"github.com/IYanHua/mdt-server/internal/protocol"
+	"github.com/IYanHua/mdt-server/internal/runtimeassets"
+	"github.com/IYanHua/mdt-server/internal/storage"
+	"github.com/IYanHua/mdt-server/internal/worldstream"
 )
 
 var globalVerboseNetLog atomic.Bool
@@ -165,6 +165,7 @@ type Server struct {
 	VirtualPlayers      int32
 	MapNameFn           func() string
 	OnChat              func(*Conn, string) bool
+	chatHandlers        []func(*Conn, string) bool
 	SpawnTileFn         func() (protocol.Point2, bool)
 	SpawnTileForConnFn  func(*Conn) (protocol.Point2, bool)
 	AssignTeamForConnFn func(*Conn) byte
@@ -423,6 +424,12 @@ func (s *Server) SetJoinLeaveChatEnabled(enabled bool) {
 
 func (s *Server) SetPlayerDisplayFormatter(fn func(*Conn) string) {
 	s.playerDisplayFormatter = fn
+}
+
+// AddChatHandler 注册一个额外的聊天处理器。多个处理器按注册顺序调用，
+// 直到某个返回 true 表示已处理（此时不再调用后续处理器）。
+func (s *Server) AddChatHandler(fn func(*Conn, string) bool) {
+	s.chatHandlers = append(s.chatHandlers, fn)
 }
 
 func (s *Server) BroadcastInfoPopup(message string, duration float32, align, top, left, bottom, right int32) {
@@ -1708,6 +1715,11 @@ func (s *Server) handlePacket(c *Conn, obj any, fromTCP bool) {
 		}
 		if s.OnChat != nil && s.OnChat(c, msg) {
 			return
+		}
+		for _, h := range s.chatHandlers {
+			if h(c, msg) {
+				return
+			}
 		}
 		s.broadcastPlayerChat(c, msg)
 	case *protocol.Remote_InputHandler_buildingControlSelect_92:

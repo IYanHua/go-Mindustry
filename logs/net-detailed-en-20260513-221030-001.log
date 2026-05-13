@@ -1,0 +1,21 @@
+2026/05/13 22:10:30 开始加载. /root/go-Mindustry/mods/main.plugin
+2026/05/13 22:10:30 加载 /root/go-Mindustry/mods/main.plugin 中...
+2026/05/13 22:10:30 成功加载 /root/go-Mindustry/mods/main.plugin
+2026-05-13T14:11:23.326644492Z [NET] kind=tcp_accept packet= conn_id=1482190996 uuid= ip=::1 name="" detail=
+2026-05-13T14:11:23.374785795Z [NET] kind=connect_packet packet=*protocol.ConnectPacket conn_id=23750 uuid=LrH3yB75MUwAAAAAbcoDWA== ip=::1 name="[scarlet]（未绑定）[]烟花易冷[gray]23750[]" detail=version=157 type=official mods=0 | checkpoint conn_uuid="23750" conn_uuid_ready=true identity_ready=true display_name_ready=true display_name="[scarlet]（未绑定）[]烟花易冷[gray]23750[]"
+2026-05-13T14:11:23.447933295Z [NET] kind=world_handshake_sent packet= conn_id=23750 uuid=LrH3yB75MUwAAAAAbcoDWA== ip=::1 name="[scarlet]（未绑定）[]烟花易冷[gray]23750[]" detail=checkpoint conn_uuid="23750" conn_uuid_ready=true identity_ready=true display_name_ready=true display_name="[scarlet]（未绑定）[]烟花易冷[gray]23750[]"
+2026-05-13T14:11:23.592022201Z [NET] kind=client_snapshot_ignored_pre_confirm packet=*protocol.Remote_NetServer_clientSnapshot_48 conn_id=23750 uuid=LrH3yB75MUwAAAAAbcoDWA== ip=::1 name="[scarlet]（未绑定）[]烟花易冷[gray]23750[]" detail=waiting_for_connect_confirm
+2026-05-13T14:11:23.593977357Z [NET] kind=connect_confirm packet=*protocol.Remote_NetServer_connectConfirm_50 conn_id=23750 uuid=LrH3yB75MUwAAAAAbcoDWA== ip=::1 name="[scarlet]（未绑定）[]烟花易冷[gray]23750[]" detail=checkpoint conn_uuid="23750" conn_uuid_ready=true identity_ready=true display_name_ready=true display_name="[scarlet]（未绑定）[]烟花易冷[gray]23750[]"
+2026-05-13T22:11:24.063933815+08:00 [RESPAWN] player="烟花易冷" team=1 core=core-shard core_x=22 core_y=49 spawn_x=22 spawn_y=49
+2026-05-13T22:11:24.064264544+08:00 [RESPAWN] player="烟花易冷" team=1 unit=35 build_speed=0.50 spawn_x=22 spawn_y=49
+2026-05-13T22:11:43.966343703+08:00 [CHAT] from="烟花易冷" player_id=1 uuid=LrH3yB75MUwAAAAAbcoDWA== ip=[::1]:51470 msg="/sync"
+2026-05-13T22:11:49.963319586+08:00 [CHAT] from="烟花易冷" player_id=1 uuid=LrH3yB75MUwAAAAAbcoDWA== ip=[::1]:51470 msg="/help"
+2026-05-13T22:11:54.924318491+08:00 [CHAT] from="烟花易冷" player_id=1 uuid=LrH3yB75MUwAAAAAbcoDWA== ip=[::1]:51470 msg="/sync"
+2026-05-13T14:12:06.871601768Z [NET] kind=tcp_closed packet= conn_id=23750 uuid=LrH3yB75MUwAAAAAbcoDWA== ip=::1 name="[scarlet]（未绑定）[]烟花易冷[gray]23750[]" detail=EOF
+2026-05-13T14:12:08.297382704Z [NET] kind=tcp_accept packet= conn_id=706037237 uuid= ip=::1 name="" detail=
+2026-05-13T14:12:08.314300465Z [NET] kind=connect_packet packet=*protocol.ConnectPacket conn_id=23750 uuid=LrH3yB75MUwAAAAAbcoDWA== ip=::1 name="[scarlet]（未绑定）[]烟花易冷[gray]23750[]" detail=version=157 type=official mods=0 | checkpoint conn_uuid="23750" conn_uuid_ready=true identity_ready=true display_name_ready=true display_name="[scarlet]（未绑定）[]烟花易冷[gray]23750[]"
+2026-05-13T14:12:08.33983984Z [NET] kind=world_handshake_sent packet= conn_id=23750 uuid=LrH3yB75MUwAAAAAbcoDWA== ip=::1 name="[scarlet]（未绑定）[]烟花易冷[gray]23750[]" detail=checkpoint conn_uuid="23750" conn_uuid_ready=true identity_ready=true display_name_ready=true display_name="[scarlet]（未绑定）[]烟花易冷[gray]23750[]"
+2026-05-13T14:12:08.418366715Z [NET] kind=client_snapshot_ignored_pre_confirm packet=*protocol.Remote_NetServer_clientSnapshot_48 conn_id=23750 uuid=LrH3yB75MUwAAAAAbcoDWA== ip=::1 name="[scarlet]（未绑定）[]烟花易冷[gray]23750[]" detail=waiting_for_connect_confirm
+2026-05-13T14:12:08.420908329Z [NET] kind=connect_confirm packet=*protocol.Remote_NetServer_connectConfirm_50 conn_id=23750 uuid=LrH3yB75MUwAAAAAbcoDWA== ip=::1 name="[scarlet]（未绑定）[]烟花易冷[gray]23750[]" detail=checkpoint conn_uuid="23750" conn_uuid_ready=true identity_ready=true display_name_ready=true display_name="[scarlet]（未绑定）[]烟花易冷[gray]23750[]"
+2026-05-13T22:12:08.868018121+08:00 [RESPAWN] player="烟花易冷" team=1 core=core-shard core_x=22 core_y=49 spawn_x=22 spawn_y=49
+2026-05-13T22:12:08.885528954+08:00 [RESPAWN] player="烟花易冷" team=1 unit=35 build_speed=0.50 spawn_x=22 spawn_y=49

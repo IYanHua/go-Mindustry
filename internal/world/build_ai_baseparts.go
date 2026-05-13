@@ -5,7 +5,7 @@ import (
 	"math/rand"
 	"strings"
 
-	"mdt-server/internal/vanilla"
+	"github.com/IYanHua/mdt-server/internal/vanilla"
 )
 
 const buildAIEmptyPartChance = float32(0.01)

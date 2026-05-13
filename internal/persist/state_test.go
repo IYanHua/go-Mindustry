@@ -5,7 +5,7 @@ import (
 	"path/filepath"
 	"testing"
 
-	"mdt-server/internal/config"
+	"github.com/IYanHua/mdt-server/internal/config"
 )
 
 func TestColdSnapshotSaveLoadWritesLatestAndArchive(t *testing.T) {

@@ -5,7 +5,7 @@ import (
 	"encoding/binary"
 	"testing"
 
-	"mdt-server/internal/protocol"
+	"github.com/IYanHua/mdt-server/internal/protocol"
 )
 
 func frameSerializerPacket(t *testing.T, packetID byte, payload []byte) *bytes.Reader {

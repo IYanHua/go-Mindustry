@@ -7,7 +7,7 @@ import (
 	"strings"
 	"time"
 
-	"mdt-server/internal/config"
+	"github.com/IYanHua/mdt-server/internal/config"
 )
 
 type ScriptState struct {

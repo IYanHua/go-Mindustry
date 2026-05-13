@@ -5,9 +5,9 @@ import (
 	"fmt"
 	"sync"
 
-	"mdt-server/internal/core"
-	"mdt-server/internal/protocol"
-	"mdt-server/internal/storage"
+	"github.com/IYanHua/mdt-server/internal/core"
+	"github.com/IYanHua/mdt-server/internal/protocol"
+	"github.com/IYanHua/mdt-server/internal/storage"
 )
 
 // NetworkCore 是网络核心（运行在 Core2 的 IO Core 中）

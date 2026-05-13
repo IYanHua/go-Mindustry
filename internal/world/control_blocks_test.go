@@ -4,7 +4,7 @@ import (
 	"testing"
 	"time"
 
-	"mdt-server/internal/protocol"
+	"github.com/IYanHua/mdt-server/internal/protocol"
 )
 
 func TestControlledTurretFiresOnlyWhileShooting(t *testing.T) {

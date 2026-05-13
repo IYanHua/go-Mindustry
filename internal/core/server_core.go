@@ -6,8 +6,8 @@ import (
 	"sync"
 	"time"
 
-	"mdt-server/internal/config"
-	"mdt-server/internal/persist"
+	"github.com/IYanHua/mdt-server/internal/config"
+	"github.com/IYanHua/mdt-server/internal/persist"
 )
 
 // ServerCore 协调四个核心的运行

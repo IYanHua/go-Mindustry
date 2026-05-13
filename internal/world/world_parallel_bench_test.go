@@ -6,8 +6,8 @@ import (
 	"testing"
 	"time"
 
-	"mdt-server/internal/protocol"
-	"mdt-server/internal/sim"
+	"github.com/IYanHua/mdt-server/internal/protocol"
+	"github.com/IYanHua/mdt-server/internal/sim"
 )
 
 func placeBenchmarkBuildingRaw(tb testing.TB, w *World, x, y int, block int16, team TeamID, rotation int8) *Tile {

@@ -15,9 +15,9 @@ import (
 	"sync"
 	"unicode/utf16"
 
-	"mdt-server/internal/protocol"
-	"mdt-server/internal/runtimeassets"
-	"mdt-server/internal/world"
+	"github.com/IYanHua/mdt-server/internal/protocol"
+	"github.com/IYanHua/mdt-server/internal/runtimeassets"
+	"github.com/IYanHua/mdt-server/internal/world"
 )
 
 var ErrInvalidMSAV = errors.New("invalid msav file")

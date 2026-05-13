@@ -6,7 +6,7 @@ import (
 	"testing"
 	"time"
 
-	"mdt-server/internal/protocol"
+	"github.com/IYanHua/mdt-server/internal/protocol"
 )
 
 func startDiscardCopy(conn net.Conn) chan struct{} {

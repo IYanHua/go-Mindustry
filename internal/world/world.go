@@ -14,8 +14,8 @@ import (
 	"sync"
 	"time"
 
-	"mdt-server/internal/protocol"
-	"mdt-server/internal/vanilla"
+	"github.com/IYanHua/mdt-server/internal/protocol"
+	"github.com/IYanHua/mdt-server/internal/vanilla"
 )
 
 type Snapshot struct {
@@ -104,6 +104,9 @@ type World struct {
 	start time.Time
 
 	model *WorldModel
+
+	paused   bool
+	gameOver bool
 
 	// 规则和波次管理器
 	rulesMgr *RulesManager
@@ -8399,8 +8402,8 @@ func (w *World) Snapshot() Snapshot {
 		WaveTime: w.waveTime,
 		Wave:     w.wave,
 		Enemies:  0,
-		Paused:   false,
-		GameOver: false,
+		Paused:   w.paused,
+		GameOver: w.gameOver,
 		TimeData: int32(time.Since(w.start).Seconds()),
 		Tps:      tps,
 		Rand0:    w.rand0,
@@ -8431,6 +8434,60 @@ func (w *World) ApplySnapshot(s Snapshot) {
 	} else {
 		w.start = time.Now()
 	}
+	w.paused = s.Paused
+	w.gameOver = s.GameOver
+}
+
+func (w *World) SetPaused(paused bool) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	w.paused = paused
+}
+
+func (w *World) IsPaused() bool {
+	w.mu.RLock()
+	defer w.mu.RUnlock()
+	return w.paused
+}
+
+func (w *World) SetGameOver(v bool) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	w.gameOver = v
+}
+
+func (w *World) IsGameOver() bool {
+	w.mu.RLock()
+	defer w.mu.RUnlock()
+	return w.gameOver
+}
+
+func (w *World) CurrentWave() int32 {
+	w.mu.RLock()
+	defer w.mu.RUnlock()
+	return w.wave
+}
+
+func (w *World) TriggerWave() {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	if w.wavesMgr != nil {
+		w.triggerWave(w.wavesMgr)
+	}
+}
+
+func (w *World) FillTeamCoreItems(team TeamID) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	if w.model == nil || team == 0 {
+		return
+	}
+	rules := w.rulesMgr.Get()
+	if rules == nil {
+		return
+	}
+	rules.setTeamRule(team, TeamRule{FillItems: true})
+	w.stepFillItemsLocked()
 }
 
 func (w *World) SetModel(m *WorldModel) {

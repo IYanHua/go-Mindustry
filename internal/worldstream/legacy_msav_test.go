@@ -9,7 +9,7 @@ import (
 	"path/filepath"
 	"testing"
 
-	"mdt-server/internal/protocol"
+	"github.com/IYanHua/mdt-server/internal/protocol"
 )
 
 func writeMSAVChunk(t *testing.T, raw *bytes.Buffer, chunk []byte) {

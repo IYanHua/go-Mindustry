@@ -8,8 +8,8 @@ import (
 	"strconv"
 	"strings"
 
-	"mdt-server/internal/world"
-	"mdt-server/internal/worldstream"
+	"github.com/IYanHua/mdt-server/internal/world"
+	"github.com/IYanHua/mdt-server/internal/worldstream"
 )
 
 type GoTraceOptions struct {

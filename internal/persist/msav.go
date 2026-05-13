@@ -1,8 +1,8 @@
 package persist
 
 import (
-	"mdt-server/internal/config"
-	"mdt-server/internal/world"
+	"github.com/IYanHua/mdt-server/internal/config"
+	"github.com/IYanHua/mdt-server/internal/world"
 )
 
 func SaveMSAVSnapshot(cfg config.PersistConfig, mapPath string, snap world.Snapshot) error {

@@ -7,7 +7,7 @@ import (
 	"testing"
 	"time"
 
-	"mdt-server/internal/protocol"
+	"github.com/IYanHua/mdt-server/internal/protocol"
 )
 
 func readFramedPacketForMenuTest(t *testing.T, conn net.Conn) (byte, []byte) {

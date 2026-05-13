@@ -1,8 +1,8 @@
 package net
 
 import (
-	"mdt-server/internal/core"
-	"mdt-server/internal/protocol"
+	"github.com/IYanHua/mdt-server/internal/core"
+	"github.com/IYanHua/mdt-server/internal/protocol"
 )
 
 // BusinessCore 是业务核心（运行在 Core1 的 Game Loop 中）

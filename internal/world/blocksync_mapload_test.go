@@ -4,7 +4,7 @@ import (
 	"math"
 	"testing"
 
-	"mdt-server/internal/protocol"
+	"github.com/IYanHua/mdt-server/internal/protocol"
 )
 
 func TestBlockSyncSnapshotsFallbackToInlineMapSyncDataForDrill(t *testing.T) {

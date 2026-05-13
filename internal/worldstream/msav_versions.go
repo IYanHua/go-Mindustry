@@ -5,7 +5,7 @@ import (
 	"fmt"
 	"sort"
 
-	"mdt-server/internal/protocol"
+	"github.com/IYanHua/mdt-server/internal/protocol"
 )
 
 type msavVersionReader interface {

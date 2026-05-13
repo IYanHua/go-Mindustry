@@ -4,9 +4,9 @@ import (
 	"testing"
 	"time"
 
-	netserver "mdt-server/internal/net"
-	"mdt-server/internal/protocol"
-	"mdt-server/internal/world"
+	netserver "github.com/IYanHua/mdt-server/internal/net"
+	"github.com/IYanHua/mdt-server/internal/protocol"
+	"github.com/IYanHua/mdt-server/internal/world"
 )
 
 func findOverlayUnit(t *testing.T, units []protocol.UnitSyncEntity, id int32) *protocol.UnitEntitySync {

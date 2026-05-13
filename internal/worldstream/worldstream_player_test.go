@@ -8,8 +8,8 @@ import (
 	"path/filepath"
 	"testing"
 
-	"mdt-server/internal/protocol"
-	"mdt-server/internal/world"
+	"github.com/IYanHua/mdt-server/internal/protocol"
+	"github.com/IYanHua/mdt-server/internal/world"
 )
 
 func contentStartFromWorldStreamRaw(raw []byte) (int, int, error) {

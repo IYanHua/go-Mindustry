@@ -6,7 +6,7 @@ import (
 	"strings"
 	"testing"
 
-	"mdt-server/internal/protocol"
+	"github.com/IYanHua/mdt-server/internal/protocol"
 )
 
 func TestLoadContentIDsIncludesOfficialBuilderCommandAndStanceIDs(t *testing.T) {

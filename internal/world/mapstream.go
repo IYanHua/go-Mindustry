@@ -3,7 +3,7 @@ package world
 import (
 	"sort"
 
-	"mdt-server/internal/protocol"
+	"github.com/IYanHua/mdt-server/internal/protocol"
 )
 
 // CloneModelForWorldStream returns a model clone with best-effort live building

@@ -4,8 +4,8 @@ package core
 import (
 	"time"
 
-	"mdt-server/internal/protocol"
-	"mdt-server/internal/world"
+	"github.com/IYanHua/mdt-server/internal/protocol"
+	"github.com/IYanHua/mdt-server/internal/world"
 )
 
 // Message is the base type for all core messages

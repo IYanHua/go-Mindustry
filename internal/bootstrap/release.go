@@ -7,7 +7,7 @@ import (
 	"path/filepath"
 	"strings"
 
-	mdtserver "mdt-server"
+	mdtserver "github.com/IYanHua/mdt-server"
 )
 
 type releasePolicy struct {

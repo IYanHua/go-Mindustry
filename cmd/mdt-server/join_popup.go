@@ -6,8 +6,8 @@ import (
 	"sync/atomic"
 	"time"
 
-	"mdt-server/internal/config"
-	netserver "mdt-server/internal/net"
+	"github.com/IYanHua/mdt-server/internal/config"
+	netserver "github.com/IYanHua/mdt-server/internal/net"
 )
 
 const (

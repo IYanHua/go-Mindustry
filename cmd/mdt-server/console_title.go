@@ -3,7 +3,7 @@ package main
 import (
 	"strings"
 
-	"mdt-server/internal/config"
+	"github.com/IYanHua/mdt-server/internal/config"
 )
 
 func applyProcessConsoleTitle(cfg config.Config, role, serverName string) {

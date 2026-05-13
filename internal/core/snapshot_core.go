@@ -8,9 +8,9 @@ import (
 	"sync/atomic"
 	"time"
 
-	"mdt-server/internal/protocol"
-	"mdt-server/internal/world"
-	"mdt-server/internal/worldstream"
+	"github.com/IYanHua/mdt-server/internal/protocol"
+	"github.com/IYanHua/mdt-server/internal/world"
+	"github.com/IYanHua/mdt-server/internal/worldstream"
 )
 
 type snapshotCacheEntry struct {

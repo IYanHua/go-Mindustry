@@ -3,7 +3,7 @@ package world
 import (
 	"math"
 
-	"mdt-server/internal/protocol"
+	"github.com/IYanHua/mdt-server/internal/protocol"
 )
 
 type RepairTarget struct {

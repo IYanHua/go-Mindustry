@@ -12,9 +12,9 @@ import (
 	"sync"
 	"time"
 
-	"mdt-server/internal/config"
-	netserver "mdt-server/internal/net"
-	"mdt-server/internal/sim"
+	"github.com/IYanHua/mdt-server/internal/config"
+	netserver "github.com/IYanHua/mdt-server/internal/net"
+	"github.com/IYanHua/mdt-server/internal/sim"
 )
 
 type Server struct {
@@ -818,4 +818,10 @@ func safeMapName(srv *netserver.Server) string {
 		return ""
 	}
 	return srv.MapNameFn()
+}
+
+func writeJSON(w http.ResponseWriter, status int, v any) error {
+	w.Header().Set("Content-Type", "application/json; charset=utf-8")
+	w.WriteHeader(status)
+	return json.NewEncoder(w).Encode(v)
 }

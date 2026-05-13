@@ -29,25 +29,27 @@ import (
 	"syscall"
 	"time"
 
-	"mdt-server/internal/api"
-	"mdt-server/internal/bootstrap"
-	"mdt-server/internal/buildinfo"
-	"mdt-server/internal/buildsvc"
-	"mdt-server/internal/config"
-	coreio "mdt-server/internal/core"
-	"mdt-server/internal/devlog"
-	"mdt-server/internal/logging"
-	netserver "mdt-server/internal/net"
-	"mdt-server/internal/persist"
-	"mdt-server/internal/protocol"
-	"mdt-server/internal/runtimeassets"
-	"mdt-server/internal/sim"
-	"mdt-server/internal/storage"
-	"mdt-server/internal/tracepoints"
-	"mdt-server/internal/vanilla"
-	"mdt-server/internal/video"
-	"mdt-server/internal/world"
-	"mdt-server/internal/worldstream"
+	"github.com/IYanHua/mdt-server/internal/api"
+	"github.com/IYanHua/mdt-server/internal/bootstrap"
+	"github.com/IYanHua/mdt-server/internal/buildinfo"
+	"github.com/IYanHua/mdt-server/internal/buildsvc"
+	"github.com/IYanHua/mdt-server/internal/config"
+	coreio "github.com/IYanHua/mdt-server/internal/core"
+	"github.com/IYanHua/mdt-server/internal/devlog"
+	"github.com/IYanHua/mdt-server/internal/logging"
+	netserver "github.com/IYanHua/mdt-server/internal/net"
+	"github.com/IYanHua/mdt-server/internal/persist"
+	plugin2 "github.com/IYanHua/mdt-server/internal/plugin"
+	"github.com/IYanHua/mdt-server/internal/plugin/builtins/statusbar"
+	"github.com/IYanHua/mdt-server/internal/protocol"
+	"github.com/IYanHua/mdt-server/internal/runtimeassets"
+	"github.com/IYanHua/mdt-server/internal/sim"
+	"github.com/IYanHua/mdt-server/internal/storage"
+	"github.com/IYanHua/mdt-server/internal/tracepoints"
+	"github.com/IYanHua/mdt-server/internal/vanilla"
+	"github.com/IYanHua/mdt-server/internal/video"
+	"github.com/IYanHua/mdt-server/internal/world"
+	"github.com/IYanHua/mdt-server/internal/worldstream"
 )
 
 type worldState struct {
@@ -1064,7 +1066,6 @@ func main() {
 	runtimeAssetsDir = cfg.Runtime.AssetsDir
 	runtimeWorldRoots = []string{cfg.Runtime.WorldsDir}
 	applyBlockNameTranslations(configDir)
-	initStatusBarRuntime(cfg)
 	initJoinPopupRuntime(cfg)
 	initMapVoteRuntimeConfig(cfg)
 
@@ -1123,8 +1124,12 @@ func main() {
 		startup.info("开发者日志", "未启用")
 	}
 
-	// Mod system disabled for now
-	var modMgr interface{} = nil
+	// 插件管理器
+	pluginMgr := plugin2.NewManager()
+	if err := pluginMgr.RegisterBuiltin(&statusbar.StatusBarPlugin{}); err != nil {
+		fmt.Fprintf(os.Stderr, "register statusbar plugin: %v\n", err)
+	}
+
 	if cfg.Mods.Enabled {
 		// startup.warn("模组系统", "暂未实现")
 		files, err := os.ReadDir(cfg.Mods.Directory)
@@ -1252,7 +1257,6 @@ func main() {
 			logTrace("server_send", "packet_send", tracepoints.PacketFields(direction, obj, packetID, frameworkID, size, extra))
 		}
 	}
-	startStatusBarLoop(srv)
 	srv.SetPlayerDisplayFormatter(func(c *netserver.Conn) string {
 		if c == nil {
 			return ""
@@ -1313,6 +1317,25 @@ func main() {
 		UseMapSyncDataFallback: cfg.Sync.UseMapSyncDataFallback,
 		BlockSyncLogsEnabled:   cfg.Sync.BlockSyncLogsEnabled,
 	})
+
+		// Initialize plugin context and start all plugins
+		pluginCtx := plugin2.NewContext(
+			plugin2.WrapServer(srv),
+			plugin2.WrapWorld(wld),
+			&cfg,
+			pluginMgr.ConsoleCommands(),
+			pluginMgr.ChatCommands(),
+			pluginMgr.EventBus(),
+			nil,
+		)
+		if err := pluginMgr.InitAll(pluginCtx); err != nil {
+			fmt.Fprintf(os.Stderr, "plugin init: %v\n", err)
+			os.Exit(1)
+		}
+		if err := pluginMgr.StartAll(); err != nil {
+			fmt.Fprintf(os.Stderr, "plugin start: %v\n", err)
+			os.Exit(1)
+		}
 	srv.EntitySnapshotHiddenFn = func(viewer *netserver.Conn, entity protocol.UnitSyncEntity) bool {
 		if viewer == nil || wld == nil {
 			return false
@@ -2874,6 +2897,22 @@ func main() {
 			return true
 		}
 		if strings.HasPrefix(trimmed, "/") {
+			// 先尝试插件注册的聊天命令
+			if pluginMgr != nil {
+				cmdName := strings.TrimPrefix(trimmed, "/")
+				if spaceIdx := strings.Index(cmdName, " "); spaceIdx > 0 {
+					cmdName = cmdName[:spaceIdx]
+				}
+				args := strings.Fields(trimmed)
+				if len(args) > 1 {
+					args = args[1:]
+				} else {
+					args = nil
+				}
+				if pluginMgr.ChatCommands().Handle(cmdName, wrapChatConn(c), args) {
+					return true
+				}
+			}
 			srv.SendChat(c, fmt.Sprintf("[scarlet]无效命令: %s[]", trimmed))
 			return true
 		}
@@ -3409,7 +3448,6 @@ func main() {
 			runtimePlayerTitleEnabled.Store(loaded.Personalization.PlayerTitleEnabled)
 			runtimePlayerConnIDSuffixEnabled.Store(loaded.Personalization.PlayerConnIDSuffixEnabled)
 			runtimePlayerConnIDSuffixFormat.Store(loaded.Personalization.PlayerConnIDSuffixFormat)
-			initStatusBarRuntime(loaded)
 			initJoinPopupRuntime(loaded)
 			initMapVoteRuntimeConfig(loaded)
 			runtimeBindStatusResolver = newBindStatusResolver(
@@ -3523,7 +3561,7 @@ func main() {
 		_ = detailLog.Close()
 		_ = recorder.Close()
 	}
-	go runConsole(srv, state, modMgr, apiSrv, scriptCtl, *addr, *buildVersion, &cfg, saveConfig, saveScript, recorder, monitor, saveOps, loadWorldModel, invalidateWorldCache, reloadVanillaProfiles, reloadVanillaContentIDs, removeEntityByID, setEntityMotion, setEntityPos, setEntityLife, setEntityFollow, setEntityPatrol, clearEntityBehavior, stopServer, closeImmediate)
+	go runConsole(srv, state, pluginMgr, apiSrv, scriptCtl, *addr, *buildVersion, &cfg, saveConfig, saveScript, recorder, monitor, saveOps, loadWorldModel, invalidateWorldCache, reloadVanillaProfiles, reloadVanillaContentIDs, removeEntityByID, setEntityMotion, setEntityPos, setEntityLife, setEntityFollow, setEntityPatrol, clearEntityBehavior, stopServer, closeImmediate, wld)
 	if serverCore != nil {
 		go func() {
 			if err := srv.Serve(); err != nil {
@@ -3617,10 +3655,58 @@ func connRemoteIP(c *netserver.Conn) string {
 	return host
 }
 
+// wrapChatConn 将 *netserver.Conn 包装为 plugin.ConnInterface
+
+func connectedPlayerCount(srv *netserver.Server) int {
+	if srv == nil {
+		return 0
+	}
+	count := 0
+	for _, session := range srv.ListSessions() {
+		if session.Connected {
+			count++
+		}
+	}
+	return count
+}
+
+func currentStatusBarMapName(srv *netserver.Server) string {
+	if srv == nil || srv.MapNameFn == nil {
+		return "unknown"
+	}
+	name := strings.TrimSpace(srv.MapNameFn())
+	if name == "" {
+		return "unknown"
+	}
+	return name
+}
+
+func currentStatusBarPlayerName(srv *netserver.Server, c *netserver.Conn) string {
+	if c == nil {
+		return "玩家"
+	}
+	if srv == nil {
+		return strings.TrimSpace(c.Name())
+	}
+	name := strings.TrimSpace(srv.PlayerDisplayName(c))
+	if name == "" {
+		name = strings.TrimSpace(c.Name())
+	}
+	if name == "" {
+		return "玩家"
+	}
+	return name
+}
+
+
+func wrapChatConn(c *netserver.Conn) plugin2.ConnInterface {
+	return plugin2.WrapConn(c)
+}
+
 func runConsole(
 	srv *netserver.Server,
 	state *worldState,
-	modMgr interface{},
+	pluginMgr *plugin2.Manager,
 	apiSrv *api.Server,
 	scriptCtl *scriptController,
 	listenAddr string,
@@ -3644,6 +3730,7 @@ func runConsole(
 	clearEntityBehavior func(id int32) bool,
 	stopServer func(reason string),
 	closeImmediate func(),
+	wld *world.World,
 ) {
 	sc := bufio.NewScanner(os.Stdin)
 	name, _, _ := srv.ServerMeta()
@@ -3688,7 +3775,7 @@ func runConsole(
 			}
 			fmt.Printf("地图列表: %s\n", strings.Join(maps, ", "))
 		case "mods":
-			if modMgr == nil {
+			if pluginMgr == nil {
 				fmt.Println("mod 管理器未初始化")
 				continue
 			}
@@ -4477,7 +4564,96 @@ func runConsole(
 			if err != nil {
 				fmt.Printf("go 执行失败: %v\n", err)
 			}
+		case "say":
+			if len(parts) < 2 {
+				fmt.Println("用法: say <message>")
+				continue
+			}
+			msg := strings.Join(parts[1:], " ")
+			srv.BroadcastChat(msg)
+			fmt.Printf("已广播聊天: %q\n", msg)
+		case "info":
+			if len(parts) < 2 {
+				fmt.Println("用法: info <UUID | IP | name>")
+				continue
+			}
+			query := strings.ToLower(strings.TrimSpace(parts[1]))
+			found := false
+			for _, cc := range srv.ListConnectedConns() {
+				uuid := strings.ToLower(cc.UUID())
+				ip := cc.RemoteAddr().String()
+				name := strings.ToLower(cc.Name())
+				if strings.Contains(uuid, query) || strings.Contains(ip, query) || strings.Contains(name, query) {
+					displayName := srv.PlayerDisplayName(cc)
+					fmt.Printf("ID=%d UUID=%s USID=%s IP=%s Name=%s\n",
+						cc.ConnID(), cc.UUID(), cc.USID(), ip, displayName)
+					found = true
+				}
+			}
+			if !found {
+				fmt.Printf("未找到匹配 %q 的玩家\n", query)
+			}
+		case "search":
+			if len(parts) < 2 {
+				fmt.Println("用法: search <name>")
+				continue
+			}
+			query := strings.ToLower(strings.TrimSpace(strings.Join(parts[1:], " ")))
+			found := false
+			for _, cc := range srv.ListConnectedConns() {
+				name := strings.ToLower(cc.Name())
+				if strings.Contains(name, query) {
+					displayName := srv.PlayerDisplayName(cc)
+					fmt.Printf("ID=%d UUID=%s USID=%s IP=%s Name=%s\n",
+						cc.ConnID(), cc.UUID(), cc.USID(), cc.RemoteAddr().String(), displayName)
+					found = true
+				}
+			}
+			if !found {
+				fmt.Printf("未找到名称包含 %q 的玩家\n", query)
+			}
+		case "pause":
+			if len(parts) < 2 || (parts[1] != "on" && parts[1] != "off") {
+				fmt.Println("用法: pause on | pause off")
+				continue
+			}
+			paused := parts[1] == "on"
+			wld.SetPaused(paused)
+			if paused {
+				fmt.Println("游戏已暂停")
+			} else {
+				fmt.Println("游戏已恢复")
+			}
+		case "gameover":
+			wld.SetGameOver(true)
+			fmt.Println("游戏已强制结束")
+			srv.BroadcastChat("游戏已强制结束 - 管理员操作")
+		case "runwave":
+			wm := wld.GetWaveManager()
+			if wm == nil {
+				fmt.Println("波次管理器未初始化")
+				continue
+			}
+			wld.TriggerWave()
+			fmt.Printf("已触发下一波 (当前波次: %d)\n", wld.CurrentWave())
+		case "fillitems":
+			if len(parts) < 2 {
+				fmt.Println("用法: fillitems <team-id>")
+				continue
+			}
+			teamID, err := strconv.Atoi(parts[1])
+			if err != nil {
+				fmt.Printf("无效队伍ID: %s\n", parts[1])
+				continue
+			}
+			wld.FillTeamCoreItems(world.TeamID(teamID))
+			fmt.Printf("已填充队伍 %d 的核心物品\n", teamID)
+		case "yes":
+			fmt.Println("(此命令在 Go 版中暂无上次命令记忆功能)")
 		default:
+			if pluginMgr != nil && pluginMgr.ConsoleCommands().Handle(cmd, parts[1:]) {
+				continue
+			}
 			fmt.Printf("未知命令: %s\n", cmd)
 		}
 	}

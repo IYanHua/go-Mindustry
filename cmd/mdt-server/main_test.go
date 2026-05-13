@@ -17,12 +17,12 @@ import (
 
 	"github.com/pierrec/lz4/v4"
 
-	"mdt-server/internal/config"
-	netserver "mdt-server/internal/net"
-	"mdt-server/internal/persist"
-	"mdt-server/internal/protocol"
-	"mdt-server/internal/world"
-	"mdt-server/internal/worldstream"
+	"github.com/IYanHua/mdt-server/internal/config"
+	netserver "github.com/IYanHua/mdt-server/internal/net"
+	"github.com/IYanHua/mdt-server/internal/persist"
+	"github.com/IYanHua/mdt-server/internal/protocol"
+	"github.com/IYanHua/mdt-server/internal/world"
+	"github.com/IYanHua/mdt-server/internal/worldstream"
 )
 
 type testBulletType struct {

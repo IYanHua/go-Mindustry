@@ -7,7 +7,7 @@ import (
 	"testing"
 	"time"
 
-	"mdt-server/internal/protocol"
+	"github.com/IYanHua/mdt-server/internal/protocol"
 )
 
 func snapshotPacketEntityIDs(t *testing.T, srv *Server, packets []*protocol.Remote_NetClient_entitySnapshot_32) []int32 {

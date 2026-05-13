@@ -8,7 +8,7 @@ import (
 	"sync"
 	"time"
 
-	"mdt-server/internal/protocol"
+	"github.com/IYanHua/mdt-server/internal/protocol"
 )
 
 type Event struct {

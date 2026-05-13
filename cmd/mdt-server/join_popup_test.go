@@ -4,7 +4,7 @@ import (
 	"strings"
 	"testing"
 
-	"mdt-server/internal/config"
+	"github.com/IYanHua/mdt-server/internal/config"
 )
 
 func TestRenderJoinPopupValueReplacesPlaceholders(t *testing.T) {

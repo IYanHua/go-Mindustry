@@ -11,7 +11,7 @@ import (
 	"sync/atomic"
 	"time"
 
-	"mdt-server/internal/protocol"
+	"github.com/IYanHua/mdt-server/internal/protocol"
 )
 
 const core2IPCTimeout = 5 * time.Second

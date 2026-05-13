@@ -2,6 +2,6 @@ module custom_plugin
 
 go 1.22
 
-require mdt-server v0.0.0
+require github.com/IYanHua/mdt-server v0.0.0
 
-replace mdt-server => ../
+replace github.com/IYanHua/mdt-server => ../

@@ -1,7 +1,7 @@
 package render
 
 import (
-	"mdt-server/internal/world"
+	"github.com/IYanHua/mdt-server/internal/world"
 )
 
 // Renderer 渲染器接口

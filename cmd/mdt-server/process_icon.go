@@ -8,7 +8,7 @@ import (
 	"path/filepath"
 	"strings"
 
-	"mdt-server/internal/buildinfo"
+	"github.com/IYanHua/mdt-server/internal/buildinfo"
 )
 
 func applyProcessWindowIcon() {

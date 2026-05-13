@@ -3,7 +3,7 @@ package world
 import (
 	"testing"
 
-	"mdt-server/internal/protocol"
+	"github.com/IYanHua/mdt-server/internal/protocol"
 )
 
 func TestUnitSyncHiddenForViewerByFogDistance(t *testing.T) {

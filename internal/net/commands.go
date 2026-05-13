@@ -7,7 +7,7 @@ import (
 	"sync"
 	"time"
 
-	"mdt-server/internal/protocol"
+	"github.com/IYanHua/mdt-server/internal/protocol"
 )
 
 var globalServer *Server

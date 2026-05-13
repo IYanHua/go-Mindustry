@@ -8,8 +8,8 @@ import (
 	"testing"
 	"time"
 
-	"mdt-server/internal/protocol"
-	"mdt-server/internal/world"
+	"github.com/IYanHua/mdt-server/internal/protocol"
+	"github.com/IYanHua/mdt-server/internal/world"
 )
 
 func TestBuildWorldStreamFromActualLiveMapParses(t *testing.T) {

@@ -4,7 +4,7 @@ import (
 	"bytes"
 	"errors"
 
-	"mdt-server/internal/protocol"
+	"github.com/IYanHua/mdt-server/internal/protocol"
 )
 
 var ErrStreamIncomplete = errors.New("stream_incomplete")

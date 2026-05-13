@@ -3,7 +3,7 @@ package world
 import (
 	"strings"
 
-	"mdt-server/internal/protocol"
+	"github.com/IYanHua/mdt-server/internal/protocol"
 )
 
 const (

@@ -10,7 +10,7 @@ import (
 	"sync"
 	"time"
 
-	"mdt-server/internal/config"
+	"github.com/IYanHua/mdt-server/internal/config"
 )
 
 const (

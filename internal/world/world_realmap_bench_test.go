@@ -7,9 +7,9 @@ import (
 	"testing"
 	"time"
 
-	"mdt-server/internal/sim"
-	"mdt-server/internal/world"
-	"mdt-server/internal/worldstream"
+	"github.com/IYanHua/mdt-server/internal/sim"
+	"github.com/IYanHua/mdt-server/internal/world"
+	"github.com/IYanHua/mdt-server/internal/worldstream"
 )
 
 func BenchmarkWorldStepCurrentMap(b *testing.B) {

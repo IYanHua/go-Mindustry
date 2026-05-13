@@ -5,7 +5,7 @@ import (
 	"sort"
 	"strings"
 
-	"mdt-server/internal/protocol"
+	"github.com/IYanHua/mdt-server/internal/protocol"
 )
 
 // BlockSyncSnapshot mirrors the payload written by vanilla NetServer.writeBlockSnapshots():

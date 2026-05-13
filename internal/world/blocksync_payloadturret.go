@@ -1,7 +1,7 @@
 package world
 
 import (
-	"mdt-server/internal/protocol"
+	"github.com/IYanHua/mdt-server/internal/protocol"
 )
 
 // writeBlockPayloadTurretAmmoLocked writes PayloadSeq data for PayloadAmmoTurret
