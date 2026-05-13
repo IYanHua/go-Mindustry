@@ -13,7 +13,7 @@ worlds_dir = "assets/worlds"
 
 [mods]
 directory = "mods"
-enabled = false
+enabled = true
 expected_client_mods = []
 go_dir = "mods/go"
 java_home = ""

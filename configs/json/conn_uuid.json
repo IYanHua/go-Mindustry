@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "updated_at": "2026-04-23T05:03:57Z",
+  "updated_at": "2026-05-13T14:12:08Z",
   "by_uuid": {
     "AAAAAAAAAAAAAAAAAAAAAA==": {
       "conn_uuid": "45503",
@@ -8,6 +8,13 @@
       "ip": "127.0.0.1",
       "first_seen": "2026-04-18T05:07:27Z",
       "last_seen": "2026-04-18T05:08:32Z"
+    },
+    "LrH3yB75MUwAAAAAbcoDWA==": {
+      "conn_uuid": "23750",
+      "name": "烟花易冷",
+      "ip": "::1",
+      "first_seen": "2026-05-13T14:11:23Z",
+      "last_seen": "2026-05-13T14:12:08Z"
     },
     "MAv3KaDNyXEAAAAAz4iNgQ==": {
       "conn_uuid": "57062",

@@ -19,6 +19,7 @@ type ConnInterface interface {
 type ServerInterface interface {
 	BroadcastChat(message string)
 	SendChatToConn(connID int32, message string)
+	SendChat(c ConnInterface, message string)
 	ListConnectedConns() []ConnInterface
 	KickByID(id int32, reason string) bool
 	ServerName() string
@@ -26,6 +27,9 @@ type ServerInterface interface {
 	ReloadWorldLiveForAll() (int, int)
 	OnChat(fn func(connID int32, message string) bool)
 	SendInfoPopup(c ConnInterface, message string, duration float32, align, top, left, bottom, right int32)
+	SendMenu(c ConnInterface, menuID int32, title, message string, options [][]string)
+	SendInfoMessage(c ConnInterface, message string)
+	SendOpenURI(c ConnInterface, uri string)
 	MapName() string
 	GameTimeSeconds() float64
 	SessionCount() int

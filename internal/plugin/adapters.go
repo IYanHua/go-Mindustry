@@ -111,6 +111,30 @@ func (a *serverAdapter) SessionCount() int {
 	return count
 }
 
+func (a *serverAdapter) SendMenu(c ConnInterface, menuID int32, title, message string, options [][]string) {
+	if nc := unwrapConn(c); nc != nil {
+		a.s.SendMenu(nc, menuID, title, message, options)
+	}
+}
+
+func (a *serverAdapter) SendInfoMessage(c ConnInterface, message string) {
+	if nc := unwrapConn(c); nc != nil {
+		a.s.SendInfoMessage(nc, message)
+	}
+}
+
+func (a *serverAdapter) SendOpenURI(c ConnInterface, uri string) {
+	if nc := unwrapConn(c); nc != nil {
+		a.s.SendOpenURI(nc, uri)
+	}
+}
+
+func (a *serverAdapter) SendChat(c ConnInterface, message string) {
+	if nc := unwrapConn(c); nc != nil {
+		a.s.SendChat(nc, message)
+	}
+}
+
 // chatAdapter 用于将 ConnInterface 转回 *net.Conn
 func unwrapConn(c ConnInterface) *net.Conn {
 	if ca, ok := c.(*connAdapter); ok {

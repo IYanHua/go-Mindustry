@@ -1,0 +1,4 @@
+{"timestamp":"2026-05-13T14:11:23.326644492Z","kind":"tcp_accept","conn_id":1482190996,"ip":"::1"}
+{"timestamp":"2026-05-13T14:11:23.327095378Z","kind":"connection_open","trigger":11,"detail":"tcp=[::1]:51470 udp=","conn_id":1482190996,"ip":"[::1]:51470"}
+{"timestamp":"2026-05-13T14:12:08.296133121Z","kind":"connection_open","trigger":11,"detail":"tcp=[::1]:44810 udp=","conn_id":706037237,"ip":"[::1]:44810"}
+{"timestamp":"2026-05-13T14:12:08.297382704Z","kind":"tcp_accept","conn_id":706037237,"ip":"::1"}

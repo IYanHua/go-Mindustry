@@ -40,6 +40,7 @@ import (
 	netserver "github.com/IYanHua/mdt-server/internal/net"
 	"github.com/IYanHua/mdt-server/internal/persist"
 	plugin2 "github.com/IYanHua/mdt-server/internal/plugin"
+	"github.com/IYanHua/mdt-server/internal/plugin/builtins/joinpopup"
 	"github.com/IYanHua/mdt-server/internal/plugin/builtins/statusbar"
 	"github.com/IYanHua/mdt-server/internal/protocol"
 	"github.com/IYanHua/mdt-server/internal/runtimeassets"
@@ -1066,7 +1067,6 @@ func main() {
 	runtimeAssetsDir = cfg.Runtime.AssetsDir
 	runtimeWorldRoots = []string{cfg.Runtime.WorldsDir}
 	applyBlockNameTranslations(configDir)
-	initJoinPopupRuntime(cfg)
 	initMapVoteRuntimeConfig(cfg)
 
 	startMemoryGuard(cfg.Core)
@@ -1126,9 +1126,14 @@ func main() {
 
 	// 插件管理器
 	pluginMgr := plugin2.NewManager()
+	joinPopupPlugin := &joinpopup.JoinPopupPlugin{}
 	if err := pluginMgr.RegisterBuiltin(&statusbar.StatusBarPlugin{}); err != nil {
 		fmt.Fprintf(os.Stderr, "register statusbar plugin: %v\n", err)
 	}
+	if err := pluginMgr.RegisterBuiltin(joinPopupPlugin); err != nil {
+		fmt.Fprintf(os.Stderr, "register joinpopup plugin: %v\n", err)
+	}
+
 
 	if cfg.Mods.Enabled {
 		// startup.warn("模组系统", "暂未实现")
@@ -1192,6 +1197,26 @@ func main() {
 	var playerIdentityStore *persist.PlayerIdentityStore
 
 	srv := netserver.NewServer(*addr, *buildVersion)
+
+	// Wire map vote handlers for join popup menu integration
+	joinPopupPlugin.SetMapVoteHandlers(
+		func(connID int32, page int) {
+			for _, c := range srv.ListConnectedConns() {
+				if c.ConnID() == connID {
+					showMapVoteMenu(srv, c, page)
+					return
+				}
+			}
+		},
+		func(connID int32, menuID, option int32) bool {
+			for _, c := range srv.ListConnectedConns() {
+				if c.ConnID() == connID {
+					return handleMapVoteMenuChoice(srv, c, menuID, option)
+				}
+			}
+			return false
+		},
+	)
 	applyAdmissionPolicy := func(loaded config.Config) error {
 		var entries []netserver.AdmissionWhitelistEntry
 		if loaded.Admin.WhitelistEnabled {
@@ -1957,13 +1982,13 @@ func main() {
 		}
 		mapPath := state.get()
 		syncPostConnectWorldStateToConn(srv, conn, wld, cache.model(mapPath), mapPath, cfg.Sync.Strategy)
-		showJoinPopupForConn(srv, conn)
+		pluginMgr.EventBus().DispatchPlayerJoin(plugin2.WrapConn(conn))
 		// Keep connect grace long enough for the official client to finish
 		// applying the streamed world and rebinding its spawned unit.
 		conn.SetWorldReloadGrace(2 * time.Second)
 	}
 	srv.OnMenuChoose = func(c *netserver.Conn, menuID, option int32) {
-		handleJoinPopupMenuChoice(srv, c, menuID, option)
+		joinPopupPlugin.HandleMenuChoice(plugin2.WrapConn(c), menuID, option)
 	}
 	srv.OnHotReloadConnFn = func(conn *netserver.Conn) {
 		if conn == nil {
@@ -2499,7 +2524,7 @@ func main() {
 		trimmed := strings.TrimSpace(msg)
 		switch trimmed {
 		case "/help":
-			sendChatHelp(srv, c, cfg)
+			joinPopupPlugin.ShowHelp(plugin2.WrapConn(c))
 			return true
 		case "/votemap":
 			if c == nil {
@@ -3448,7 +3473,6 @@ func main() {
 			runtimePlayerTitleEnabled.Store(loaded.Personalization.PlayerTitleEnabled)
 			runtimePlayerConnIDSuffixEnabled.Store(loaded.Personalization.PlayerConnIDSuffixEnabled)
 			runtimePlayerConnIDSuffixFormat.Store(loaded.Personalization.PlayerConnIDSuffixFormat)
-			initJoinPopupRuntime(loaded)
 			initMapVoteRuntimeConfig(loaded)
 			runtimeBindStatusResolver = newBindStatusResolver(
 				loaded.Personalization.PlayerBindSource,
@@ -4892,13 +4916,6 @@ func colorState(enabled bool) string {
 	return "\x1b[31m✗ 关闭\x1b[0m"
 }
 
-func sendChatHelp(srv *netserver.Server, c *netserver.Conn, cfg config.Config) {
-	_ = cfg
-	if srv == nil || c == nil {
-		return
-	}
-	showHelpPageMenu(srv, c, currentJoinPopupRuntime(), 0)
-}
 
 type scriptPlugin struct {
 	Runtime string
