@@ -25,11 +25,23 @@ build:
 	@go build -o $(BIN_DIR)/$(BIN_NAME)$(BIN_EXT) $(MODULE_DIR)
 	@echo "构建完成: $(BIN_DIR)/$(BIN_NAME)$(BIN_EXT)"
 
-# 构建插件
+# 构建旧版插件
 build-plugin:
 	@echo "正在构建插件..."
 	@go build -buildmode=plugin -o $(MODS_DIR)/main.plugin $(PLUGIN_DIR)
 	@echo "插件构建完成: $(MODS_DIR)/main.plugin"
+
+# 构建所有内置 .so 插件
+SO_PLUGINS   := mapvote unitcommands admincmds api scriptrunner statusbar joinpopup
+SO_OUTDIR    := plugins
+
+build-plugins:
+	@mkdir -p $(SO_OUTDIR)
+	@for p in $(SO_PLUGINS); do \
+		echo "  -> $$p.so"; \
+		CGO_ENABLED=1 go build -buildmode=plugin -o $(SO_OUTDIR)/$$p.so ./cmd/plugins/$$p/ || exit 1; \
+	done
+	@echo "插件构建完成: $(SO_OUTDIR)/"
 
 # 清理
 clean:

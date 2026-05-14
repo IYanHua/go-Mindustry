@@ -24,6 +24,9 @@ func NewLogger(prefix string) *Logger {
 }
 
 func (l *Logger) log(level, format string, args ...any) {
+	if l == nil {
+		return
+	}
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	ts := time.Now().Format("15:04:05")

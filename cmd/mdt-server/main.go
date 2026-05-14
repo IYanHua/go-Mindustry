@@ -3,7 +3,6 @@ package main
 import (
 	"bufio"
 	"bytes"
-	"crypto/rand"
 	"encoding/json"
 	"errors"
 	"flag"
@@ -29,7 +28,6 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/IYanHua/mdt-server/internal/api"
 	"github.com/IYanHua/mdt-server/internal/bootstrap"
 	"github.com/IYanHua/mdt-server/internal/buildinfo"
 	"github.com/IYanHua/mdt-server/internal/buildsvc"
@@ -40,8 +38,13 @@ import (
 	netserver "github.com/IYanHua/mdt-server/internal/net"
 	"github.com/IYanHua/mdt-server/internal/persist"
 	plugin2 "github.com/IYanHua/mdt-server/internal/plugin"
+	"github.com/IYanHua/mdt-server/internal/plugin/builtins/admincmds"
+	apiplugin "github.com/IYanHua/mdt-server/internal/plugin/builtins/api"
 	"github.com/IYanHua/mdt-server/internal/plugin/builtins/joinpopup"
+	"github.com/IYanHua/mdt-server/internal/plugin/builtins/mapvote"
+	"github.com/IYanHua/mdt-server/internal/plugin/builtins/scriptrunner"
 	"github.com/IYanHua/mdt-server/internal/plugin/builtins/statusbar"
+	"github.com/IYanHua/mdt-server/internal/plugin/builtins/unitcommands"
 	"github.com/IYanHua/mdt-server/internal/protocol"
 	"github.com/IYanHua/mdt-server/internal/runtimeassets"
 	"github.com/IYanHua/mdt-server/internal/sim"
@@ -1067,7 +1070,6 @@ func main() {
 	runtimeAssetsDir = cfg.Runtime.AssetsDir
 	runtimeWorldRoots = []string{cfg.Runtime.WorldsDir}
 	applyBlockNameTranslations(configDir)
-	initMapVoteRuntimeConfig(cfg)
 
 	startMemoryGuard(cfg.Core)
 
@@ -1127,13 +1129,37 @@ func main() {
 	// 插件管理器
 	pluginMgr := plugin2.NewManager()
 	joinPopupPlugin := &joinpopup.JoinPopupPlugin{}
+	mapVotePlugin := mapvote.NewMapVotePlugin()
+	unitCmdPlugin := &unitcommands.Plugin{}
+	apiPlugin := &apiplugin.Plugin{}
 	if err := pluginMgr.RegisterBuiltin(&statusbar.StatusBarPlugin{}); err != nil {
 		fmt.Fprintf(os.Stderr, "register statusbar plugin: %v\n", err)
 	}
 	if err := pluginMgr.RegisterBuiltin(joinPopupPlugin); err != nil {
 		fmt.Fprintf(os.Stderr, "register joinpopup plugin: %v\n", err)
 	}
+	if err := pluginMgr.RegisterBuiltin(&scriptrunner.ScriptRunnerPlugin{}); err != nil {
+		fmt.Fprintf(os.Stderr, "register scriptrunner plugin: %v\n", err)
+	}
+	if err := pluginMgr.RegisterBuiltin(mapVotePlugin); err != nil {
+		fmt.Fprintf(os.Stderr, "register mapvote plugin: %v\n", err)
+	}
+	if err := pluginMgr.RegisterBuiltin(unitCmdPlugin); err != nil {
+		fmt.Fprintf(os.Stderr, "register unitcommands plugin: %v\n", err)
+	}
+	if err := pluginMgr.RegisterBuiltin(&admincmds.Plugin{}); err != nil {
+		fmt.Fprintf(os.Stderr, "register admincmds plugin: %v\n", err)
+	}
+	if err := pluginMgr.RegisterBuiltin(apiPlugin); err != nil {
+		fmt.Fprintf(os.Stderr, "register api plugin: %v\n", err)
+	}
 
+	// 加载 .so 动态插件
+	if loaded, err := pluginMgr.LoadFromDir("plugins"); err != nil {
+		fmt.Fprintf(os.Stderr, "load plugins dir: %v\n", err)
+	} else if loaded > 0 {
+		startup.ok("动态插件", fmt.Sprintf("已加载 %d 个", loaded))
+	}
 
 	if cfg.Mods.Enabled {
 		// startup.warn("模组系统", "暂未实现")
@@ -1203,7 +1229,7 @@ func main() {
 		func(connID int32, page int) {
 			for _, c := range srv.ListConnectedConns() {
 				if c.ConnID() == connID {
-					showMapVoteMenu(srv, c, page)
+					mapVotePlugin.ShowVoteMenuForConn(c, page)
 					return
 				}
 			}
@@ -1211,7 +1237,7 @@ func main() {
 		func(connID int32, menuID, option int32) bool {
 			for _, c := range srv.ListConnectedConns() {
 				if c.ConnID() == connID {
-					return handleMapVoteMenuChoice(srv, c, menuID, option)
+					return mapVotePlugin.HandleVoteMenuChoiceForConn(c, menuID, option)
 				}
 			}
 			return false
@@ -1500,7 +1526,7 @@ func main() {
 			srv.ConsumeConnUnit(c, unitID)
 		}
 	}
-	unitCommands := newUnitCommandService()
+	unitCommands := unitCmdPlugin.Svc
 	buildService := buildsvc.New(wld, buildsvc.Options{
 		MaxQueuedBatches: 256,
 		MaxPlansPerBatch: 20,
@@ -1781,9 +1807,7 @@ func main() {
 		srv.BroadcastChat(fmt.Sprintf("[accent]地图已切换[]: [white]%s[]（成功=%d 失败=%d）", mapName, reloaded, failed))
 		return nil
 	}
-	initMapVoteRuntime(listWorldMaps, resolveWorldSelection, applyVotedWorld, func(result mapVoteResult) {
-		handleMapVoteResult(srv, currentMapVoteRuntime(), result)
-	}, srv)
+	mapVotePlugin.SetCallbacks(listWorldMaps, resolveWorldSelection, applyVotedWorld, nil)
 	loadWorldModel(initialWorld)
 	if restoredSnapshotOK {
 		waveTime := normalizeSnapshotWaveTimeSeconds(wld, restoredSnapshot.WaveTime)
@@ -1916,16 +1940,6 @@ func main() {
 	saveOps := func() {
 		_ = persist.SaveOps(cfg.Admin, srv.ListOps())
 	}
-	saveScript := func() error {
-		return persist.SaveScriptConfig(cfg.Script, persist.ScriptState{
-			Version:      1,
-			StartupTasks: cfg.Script.StartupTasks,
-			DailyGCTime:  cfg.Script.DailyGCTime,
-		})
-	}
-	scriptCtl := newScriptController(cfg.Mods)
-	scriptCtl.ScheduleStartupTasks(cfg.Script.StartupTasks)
-	scriptCtl.SetDailyGC(cfg.Script.DailyGCTime)
 	var serverCore *coreio.ServerCore
 
 	cache = &worldCache{content: srv.Content}
@@ -2254,13 +2268,13 @@ func main() {
 		wld.CancelBuildAtForOwner(owner, x, y, breaking)
 	}
 	srv.OnCommandUnits = func(c *netserver.Conn, unitIDs []int32, buildTarget any, unitTarget any, posTarget any, queueCommand bool, _ bool) {
-		unitCommands.applyCommandUnits(c, wld, unitIDs, buildTarget, unitTarget, posTarget, queueCommand)
+		unitCommands.ApplyCommandUnits(c, wld, unitIDs, buildTarget, unitTarget, posTarget, queueCommand)
 	}
 	srv.OnSetUnitCommand = func(c *netserver.Conn, unitIDs []int32, command *protocol.UnitCommand) {
-		unitCommands.applySetUnitCommand(c, wld, unitIDs, command)
+		unitCommands.ApplySetUnitCommand(c, wld, unitIDs, command)
 	}
 	srv.OnSetUnitStance = func(c *netserver.Conn, unitIDs []int32, stance protocol.UnitStance, enable bool) {
-		unitCommands.applySetUnitStance(c, wld, unitIDs, stance, enable)
+		unitCommands.ApplySetUnitStance(c, wld, unitIDs, stance, enable)
 	}
 	srv.OnCommandBuilding = func(c *netserver.Conn, buildings []int32, target protocol.Vec2) {
 		wld.CommandBuildingsPacked(buildings, target)
@@ -2309,7 +2323,7 @@ func main() {
 		}
 	}
 	srv.ExtraEntitySnapshotEntitiesFn = func() ([]protocol.UnitSyncEntity, error) {
-		return unitCommands.overlay(wld.EntitySyncSnapshots(srv.Content, srv.PlayerUnitIDSet())), nil
+		return unitCommands.Overlay(wld.EntitySyncSnapshots(srv.Content, srv.PlayerUnitIDSet())), nil
 	}
 	traceWorldRuntimeTick := func(stage string) {
 		tc := currentTraceCfg()
@@ -2357,7 +2371,7 @@ func main() {
 				ev := evs[i]
 				switch ev.Kind {
 				case world.EntityEventRemoved:
-					unitCommands.remove(ev.Entity.ID)
+					unitCommands.Remove(ev.Entity.ID)
 					broadcastUnitDestroy(srv, ev.Entity.ID)
 					if ev.Entity.Health <= 0 {
 						if _, ok := srv.PlayerUnitIDSet()[ev.Entity.ID]; ok {
@@ -2517,6 +2531,9 @@ func main() {
 	saveState := func() {}
 	flushColdSnapshot := func() {}
 	srv.OnChat = func(c *netserver.Conn, msg string) bool {
+		if c != nil && pluginMgr.EventBus().DispatchChat(plugin2.WrapConn(c), msg) {
+			return true
+		}
 		if c != nil && strings.TrimSpace(msg) != "" && shouldFileLogChat() {
 			detailLog.LogLine(fmt.Sprintf("%s [CHAT] from=%q player_id=%d uuid=%s ip=%s msg=%q",
 				time.Now().Format(time.RFC3339Nano), c.Name(), c.PlayerID(), c.UUID(), c.RemoteAddr().String(), strings.TrimSpace(msg)))
@@ -2525,18 +2542,6 @@ func main() {
 		switch trimmed {
 		case "/help":
 			joinPopupPlugin.ShowHelp(plugin2.WrapConn(c))
-			return true
-		case "/votemap":
-			if c == nil {
-				return true
-			}
-			showMapVoteMenu(srv, c, 0)
-			return true
-		case "/vote":
-			if c == nil {
-				return true
-			}
-			showActiveMapVoteMenu(srv, c)
 			return true
 		case "/status":
 			srv.SendStatusTo(c)
@@ -2547,35 +2552,6 @@ func main() {
 			}
 			syncCurrentRuntimeStateToConn(srv, c, wld, state.get())
 			srv.SendChat(c, "[accent]已同步当前运行状态[]")
-			return true
-		}
-		lowerTrimmed := strings.ToLower(trimmed)
-		if strings.HasPrefix(lowerTrimmed, "/votemap ") {
-			if c == nil {
-				return true
-			}
-			startMapVote(srv, c, strings.TrimSpace(trimmed[len("/votemap "):]))
-			return true
-		}
-		if strings.HasPrefix(lowerTrimmed, "/vote ") {
-			if c == nil {
-				return true
-			}
-			args := strings.Fields(lowerTrimmed)
-			if len(args) < 2 {
-				showActiveMapVoteMenu(srv, c)
-				return true
-			}
-			switch args[1] {
-			case "yes", "y", "1", "同意":
-				castMapVote(srv, c, 1)
-			case "no", "n", "0", "反对":
-				castMapVote(srv, c, -1)
-			case "neutral", "mid", "中立", "abstain":
-				castMapVote(srv, c, 0)
-			default:
-				srv.SendChat(c, "[scarlet]用法: /vote yes|no|neutral[]")
-			}
 			return true
 		}
 		if strings.EqualFold(trimmed, "/stop") {
@@ -2981,7 +2957,8 @@ func main() {
 	runWorldTick := func(delta time.Duration) {
 		step := func() {
 			wld.Step(delta)
-			unitCommands.step(wld)
+			unitCommands.Step(wld)
+			pluginMgr.EventBus().DispatchTick()
 			traceWorldRuntimeTick("game_tick")
 		}
 		if engine != nil {
@@ -3046,6 +3023,7 @@ func main() {
 		}
 		baseConnClose := func(c *netserver.Conn) {
 			if c != nil {
+				pluginMgr.EventBus().DispatchPlayerLeave(plugin2.WrapConn(c))
 				if publicConnUUIDStore != nil && runtimePublicConnUUIDEnabled.Load() {
 					host := ""
 					if c.RemoteAddr() != nil {
@@ -3132,6 +3110,7 @@ func main() {
 			if c == nil {
 				return
 			}
+			pluginMgr.EventBus().DispatchPlayerLeave(plugin2.WrapConn(c))
 			if publicConnUUIDStore != nil && runtimePublicConnUUIDEnabled.Load() {
 				host := ""
 				if c.RemoteAddr() != nil {
@@ -3247,7 +3226,6 @@ func main() {
 		startup.info("视频录制", "未启用")
 	}
 	var (
-		apiSrv      *api.Server
 		apiListener net.Listener
 	)
 	if cfg.API.Enabled {
@@ -3268,9 +3246,9 @@ func main() {
 				return &st
 			}
 		}
-		apiSrv = api.New(cfg.API, srv, statsFn)
+		apiPlugin.InitServer(srv, statsFn)
 		go func() {
-			if err := apiSrv.ServeListener(apiListener); err != nil {
+			if err := apiPlugin.Server().ServeListener(apiListener); err != nil {
 				log.Error("api serve failed", logging.Field{Key: "error", Value: err.Error()})
 			}
 		}()
@@ -3281,6 +3259,7 @@ func main() {
 	var stopOnce sync.Once
 	stopServer := func(reason string) {
 		stopOnce.Do(func() {
+			pluginMgr.EventBus().DispatchShutdown()
 			const shutdownForceTimeout = 6 * time.Second
 			forceExit := time.AfterFunc(shutdownForceTimeout, func() {
 				fmt.Println("关闭超时，强制退出服务器")
@@ -3354,8 +3333,8 @@ func main() {
 			stopServer(fmt.Sprintf("检测到 %s 子进程退出，正在保存并关闭服务器", role))
 		})
 	}
-	if apiSrv != nil {
-		apiSrv.SetSummonFunc(func(typeID int16, x, y float32, team byte) error {
+	if apiPlugin.Server() != nil {
+		apiPlugin.Server().SetSummonFunc(func(typeID int16, x, y float32, team byte) error {
 			ent, err := wld.AddEntity(typeID, x, y, world.TeamID(team))
 			if err != nil {
 				return err
@@ -3365,45 +3344,45 @@ func main() {
 			srv.BroadcastChat(fmt.Sprintf("[accent]API召唤单位[] id=%d type=%d x=%.1f y=%.1f team=%d", ent.ID, typeID, x, y, team))
 			return nil
 		})
-		apiSrv.SetStopFunc(func() {
+		apiPlugin.Server().SetStopFunc(func() {
 			stopServer("API 请求关闭服务器")
 		})
-		apiSrv.SetUnitMoveFunc(func(id int32, vx, vy, rotVel float32) error {
+		apiPlugin.Server().SetUnitMoveFunc(func(id int32, vx, vy, rotVel float32) error {
 			if _, ok := wld.SetEntityMotion(id, vx, vy, rotVel); !ok {
 				return errors.New("entity not found")
 			}
 			saveState()
 			return nil
 		})
-		apiSrv.SetUnitTeleportFunc(func(id int32, x, y, rotation float32) error {
+		apiPlugin.Server().SetUnitTeleportFunc(func(id int32, x, y, rotation float32) error {
 			if _, ok := wld.SetEntityPosition(id, x, y, rotation); !ok {
 				return errors.New("entity not found")
 			}
 			saveState()
 			return nil
 		})
-		apiSrv.SetUnitLifeFunc(func(id int32, lifeSec float32) error {
+		apiPlugin.Server().SetUnitLifeFunc(func(id int32, lifeSec float32) error {
 			if _, ok := wld.SetEntityLife(id, lifeSec); !ok {
 				return errors.New("entity not found")
 			}
 			saveState()
 			return nil
 		})
-		apiSrv.SetUnitFollowFunc(func(id int32, targetID int32, speed float32) error {
+		apiPlugin.Server().SetUnitFollowFunc(func(id int32, targetID int32, speed float32) error {
 			if _, ok := wld.SetEntityFollow(id, targetID, speed); !ok {
 				return errors.New("entity not found")
 			}
 			saveState()
 			return nil
 		})
-		apiSrv.SetUnitPatrolFunc(func(id int32, x1, y1, x2, y2, speed float32) error {
+		apiPlugin.Server().SetUnitPatrolFunc(func(id int32, x1, y1, x2, y2, speed float32) error {
 			if _, ok := wld.SetEntityPatrol(id, x1, y1, x2, y2, speed); !ok {
 				return errors.New("entity not found")
 			}
 			saveState()
 			return nil
 		})
-		apiSrv.SetUnitBehaviorFunc(func(id int32, mode string) error {
+		apiPlugin.Server().SetUnitBehaviorFunc(func(id int32, mode string) error {
 			switch strings.ToLower(strings.TrimSpace(mode)) {
 			case "", "clear", "none", "stop":
 				if _, ok := wld.ClearEntityBehavior(id); !ok {
@@ -3415,7 +3394,7 @@ func main() {
 				return errors.New("unsupported behavior mode")
 			}
 		})
-		apiSrv.SetOpsChangedFunc(func() {
+		apiPlugin.Server().SetOpsChangedFunc(func() {
 			saveOps()
 		})
 	}
@@ -3473,7 +3452,7 @@ func main() {
 			runtimePlayerTitleEnabled.Store(loaded.Personalization.PlayerTitleEnabled)
 			runtimePlayerConnIDSuffixEnabled.Store(loaded.Personalization.PlayerConnIDSuffixEnabled)
 			runtimePlayerConnIDSuffixFormat.Store(loaded.Personalization.PlayerConnIDSuffixFormat)
-			initMapVoteRuntimeConfig(loaded)
+			mapVotePlugin.ReloadConfig(&loaded)
 			runtimeBindStatusResolver = newBindStatusResolver(
 				loaded.Personalization.PlayerBindSource,
 				loaded.Personalization.PlayerBindAPIURL,
@@ -3503,8 +3482,8 @@ func main() {
 				fmt.Printf("[config] tracepoints file changed to %s, restart required to reopen trace log file\n", loaded.Tracepoints.File)
 			}
 
-			if apiSrv != nil {
-				applyAPIKeySet(apiSrv, loaded.API.Keys)
+			if apiPlugin.Server() != nil {
+				apiPlugin.ApplyAPIKeySet( loaded.API.Keys)
 			}
 			if loaded.API.Enabled != cfg.API.Enabled || loaded.API.Bind != cfg.API.Bind {
 				if cfg.Control.ReloadLogEnabled {
@@ -3585,7 +3564,7 @@ func main() {
 		_ = detailLog.Close()
 		_ = recorder.Close()
 	}
-	go runConsole(srv, state, pluginMgr, apiSrv, scriptCtl, *addr, *buildVersion, &cfg, saveConfig, saveScript, recorder, monitor, saveOps, loadWorldModel, invalidateWorldCache, reloadVanillaProfiles, reloadVanillaContentIDs, removeEntityByID, setEntityMotion, setEntityPos, setEntityLife, setEntityFollow, setEntityPatrol, clearEntityBehavior, stopServer, closeImmediate, wld)
+	go runConsole(srv, state, pluginMgr, *addr, *buildVersion, &cfg, saveConfig, recorder, monitor, saveOps, loadWorldModel, invalidateWorldCache, reloadVanillaProfiles, reloadVanillaContentIDs, removeEntityByID, setEntityMotion, setEntityPos, setEntityLife, setEntityFollow, setEntityPatrol, clearEntityBehavior, stopServer, closeImmediate, wld)
 	if serverCore != nil {
 		go func() {
 			if err := srv.Serve(); err != nil {
@@ -3681,46 +3660,6 @@ func connRemoteIP(c *netserver.Conn) string {
 
 // wrapChatConn 将 *netserver.Conn 包装为 plugin.ConnInterface
 
-func connectedPlayerCount(srv *netserver.Server) int {
-	if srv == nil {
-		return 0
-	}
-	count := 0
-	for _, session := range srv.ListSessions() {
-		if session.Connected {
-			count++
-		}
-	}
-	return count
-}
-
-func currentStatusBarMapName(srv *netserver.Server) string {
-	if srv == nil || srv.MapNameFn == nil {
-		return "unknown"
-	}
-	name := strings.TrimSpace(srv.MapNameFn())
-	if name == "" {
-		return "unknown"
-	}
-	return name
-}
-
-func currentStatusBarPlayerName(srv *netserver.Server, c *netserver.Conn) string {
-	if c == nil {
-		return "玩家"
-	}
-	if srv == nil {
-		return strings.TrimSpace(c.Name())
-	}
-	name := strings.TrimSpace(srv.PlayerDisplayName(c))
-	if name == "" {
-		name = strings.TrimSpace(c.Name())
-	}
-	if name == "" {
-		return "玩家"
-	}
-	return name
-}
 
 
 func wrapChatConn(c *netserver.Conn) plugin2.ConnInterface {
@@ -3731,13 +3670,10 @@ func runConsole(
 	srv *netserver.Server,
 	state *worldState,
 	pluginMgr *plugin2.Manager,
-	apiSrv *api.Server,
-	scriptCtl *scriptController,
 	listenAddr string,
 	build int,
 	cfg *config.Config,
 	saveConfig func() error,
-	saveScript func() error,
 	recorder storage.Recorder,
 	monitor *statusMonitor,
 	saveOps func(),
@@ -4545,13 +4481,9 @@ func runConsole(
 			}
 			fmt.Printf("已清除单位行为: id=%d\n", id)
 		case "api":
-			handleAPIConsole(parts, cfg, apiSrv, saveConfig)
-		case "progress":
-			printServerProgress(*cfg, apiSrv != nil, scriptCtl)
+			// api handled by plugin
 		case "compat":
 			printCompatStatus(*cfg, srv)
-		case "script":
-			handleScriptConsole(parts, cfg, saveScript, scriptCtl)
 		case "js":
 			if len(parts) < 2 {
 				fmt.Println("用法: js <script.js> [args...]")
@@ -5057,62 +4989,6 @@ func securePathInDir(baseDir, relative string) (string, string, error) {
 	return absTarget, absBase, nil
 }
 
-func handleAPIConsole(parts []string, cfg *config.Config, apiSrv *api.Server, saveConfig func() error) {
-	if len(parts) == 1 || strings.EqualFold(parts[1], "status") {
-		fmt.Printf("api: enabled=%v bind=%s keys=%d\n", cfg.API.Enabled, cfg.API.Bind, len(cfg.API.Keys))
-		fmt.Println("用法: api status | api keys | api keygen | api keydel <key>")
-		return
-	}
-	switch strings.ToLower(parts[1]) {
-	case "keys":
-		if len(cfg.API.Keys) == 0 {
-			fmt.Println("当前无 APIKEY")
-			return
-		}
-		fmt.Printf("APIKEY(%d):\n", len(cfg.API.Keys))
-		for _, k := range cfg.API.Keys {
-			fmt.Printf("  %s\n", k)
-		}
-	case "keygen":
-		key, err := generateAPIKey()
-		if err != nil {
-			fmt.Printf("生成 APIKEY 失败: %v\n", err)
-			return
-		}
-		cfg.API.Keys = mergeKeys(cfg.API.Keys, key)
-		cfg.API.Key = ""
-		if apiSrv != nil {
-			_ = apiSrv.AddAPIKey(key)
-		}
-		if err := saveConfig(); err != nil {
-			fmt.Printf("保存配置失败: %v\n", err)
-			return
-		}
-		fmt.Printf("已生成 APIKEY: %s\n", key)
-	case "keydel":
-		if len(parts) < 3 {
-			fmt.Println("用法: api keydel <key>")
-			return
-		}
-		target := strings.TrimSpace(parts[2])
-		if target == "" {
-			fmt.Println("key 不能为空")
-			return
-		}
-		cfg.API.Keys = removeKey(cfg.API.Keys, target)
-		cfg.API.Key = ""
-		if apiSrv != nil {
-			_ = apiSrv.DeleteAPIKey(target)
-		}
-		if err := saveConfig(); err != nil {
-			fmt.Printf("保存配置失败: %v\n", err)
-			return
-		}
-		fmt.Println("已删除 APIKEY")
-	default:
-		fmt.Println("用法: api status | api keys | api keygen | api keydel <key>")
-	}
-}
 
 func mergeKeys(keys []string, extra ...string) []string {
 	set := map[string]struct{}{}
@@ -5146,77 +5022,7 @@ func mergeValidAPIKeys(keys []string, extra ...string) ([]string, error) {
 	return merged, nil
 }
 
-func applyAPIKeySet(apiSrv *api.Server, desired []string) {
-	if apiSrv == nil {
-		return
-	}
-	current := apiSrv.ListAPIKeys()
-	curSet := map[string]struct{}{}
-	dstSet := map[string]struct{}{}
-	for _, k := range current {
-		curSet[k] = struct{}{}
-	}
-	for _, k := range desired {
-		dstSet[k] = struct{}{}
-	}
-	for k := range curSet {
-		if _, ok := dstSet[k]; !ok {
-			_ = apiSrv.DeleteAPIKey(k)
-		}
-	}
-	for k := range dstSet {
-		if _, ok := curSet[k]; !ok {
-			_ = apiSrv.AddAPIKey(k)
-		}
-	}
-}
 
-func removeKey(keys []string, target string) []string {
-	target = strings.TrimSpace(target)
-	if target == "" {
-		return mergeKeys(keys)
-	}
-	out := make([]string, 0, len(keys))
-	for _, k := range keys {
-		if strings.TrimSpace(k) == target {
-			continue
-		}
-		out = append(out, k)
-	}
-	return mergeKeys(out)
-}
-
-func generateAPIKey() (string, error) {
-	parts := []int{15, 13, 15, 19, 12, 10}
-	out := []string{"mdt-server-go"}
-	for i, n := range parts {
-		if i == 5 {
-			out = append(out, "yzf")
-		}
-		s, err := randomAlphaNum(n)
-		if err != nil {
-			return "", err
-		}
-		out = append(out, s)
-	}
-	return strings.Join(out, "-"), nil
-}
-
-func randomAlphaNum(n int) (string, error) {
-	const alpha = "abcdefghijklmnopqrstuvwxyz0123456789"
-	if n <= 0 {
-		return "", nil
-	}
-	buf := make([]byte, n)
-	raw := make([]byte, n)
-	if _, err := rand.Read(raw); err != nil {
-		return "", err
-	}
-	for i := 0; i < n; i++ {
-		buf[i] = alpha[int(raw[i])%len(alpha)]
-	}
-	return string(buf), nil
-}
 
 func currentPlayerNamePrefix() string {
 	if v := runtimePlayerNamePrefix.Load(); v != nil {
@@ -6204,26 +6010,6 @@ func broadcastRelatedBlockSnapshots(srv *netserver.Server, wld *world.World, pac
 	broadcastItemTurretAmmoSnapshotsForPacked(srv, wld, positions)
 }
 
-func broadcastUnitFactorySnapshots(srv *netserver.Server, wld *world.World) {
-	if srv == nil || wld == nil {
-		return
-	}
-	broadcastFilteredBlockSnapshots(srv, wld, wld.UnitFactoryBlockSyncSnapshotsLiveOnly(), true)
-}
-
-func broadcastTurretSnapshots(srv *netserver.Server, wld *world.World) {
-	if srv == nil || wld == nil {
-		return
-	}
-	broadcastFilteredBlockSnapshots(srv, wld, wld.TurretBlockSyncSnapshotsLiveOnly(), true)
-}
-
-func broadcastPayloadProcessorSnapshots(srv *netserver.Server, wld *world.World) {
-	if srv == nil || wld == nil {
-		return
-	}
-	broadcastFilteredBlockSnapshots(srv, wld, wld.PayloadProcessorBlockSyncSnapshotsLiveOnly(), true)
-}
 
 func syncCurrentWorldToConn(conn *netserver.Conn, wld *world.World) {
 	if conn == nil || wld == nil {
@@ -6793,231 +6579,6 @@ func broadcastBulletCreate(srv *netserver.Server, b world.BulletEvent) {
 		return
 	}
 	srv.BroadcastUnreliable(packet)
-}
-
-type scriptController struct {
-	modsCfg config.ModsConfig
-	mu      sync.Mutex
-	gcStop  chan struct{}
-}
-
-func newScriptController(modsCfg config.ModsConfig) *scriptController {
-	return &scriptController{modsCfg: modsCfg}
-}
-
-func (s *scriptController) RunTask(task config.ScriptTask) (string, error) {
-	rt := strings.ToLower(strings.TrimSpace(task.Runtime))
-	switch rt {
-	case "js":
-		return runNodeScriptInDir(s.modsCfg.JSDir, task.Target, task.Args...)
-	case "node":
-		return runNodeScriptInDir(s.modsCfg.NodeDir, task.Target, task.Args...)
-	case "go":
-		return runGoInDir(s.modsCfg.GoDir, task.Target, task.Args...)
-	default:
-		return "", fmt.Errorf("不支持的 runtime: %s", task.Runtime)
-	}
-}
-
-func (s *scriptController) ScheduleStartupTasks(tasks []config.ScriptTask) {
-	for i := range tasks {
-		task := tasks[i]
-		delay := task.DelaySec
-		if delay < 0 {
-			delay = 0
-		}
-		go func(t config.ScriptTask, d int) {
-			if d > 0 {
-				time.Sleep(time.Duration(d) * time.Second)
-			}
-			out, err := s.RunTask(t)
-			if out != "" {
-				fmt.Printf("[script][startup] output runtime=%s target=%s\n%s\n", t.Runtime, t.Target, out)
-			}
-			if err != nil {
-				fmt.Printf("[script][startup] failed runtime=%s target=%s err=%v\n", t.Runtime, t.Target, err)
-				return
-			}
-			fmt.Printf("[script][startup] done runtime=%s target=%s delay=%ds\n", t.Runtime, t.Target, d)
-		}(task, delay)
-	}
-}
-
-func (s *scriptController) RunGCNow() {
-	runtime.GC()
-	debug.FreeOSMemory()
-	fmt.Println("[script] 已执行 GC 与内存回收")
-}
-
-func (s *scriptController) SetDailyGC(hhmm string) error {
-	hhmm = strings.TrimSpace(hhmm)
-	s.mu.Lock()
-	if s.gcStop != nil {
-		close(s.gcStop)
-		s.gcStop = nil
-	}
-	s.mu.Unlock()
-	if hhmm == "" || strings.EqualFold(hhmm, "off") {
-		fmt.Println("[script] 每日 GC 已关闭")
-		return nil
-	}
-	if _, err := time.Parse("15:04", hhmm); err != nil {
-		return fmt.Errorf("时间格式错误，需 HH:MM: %w", err)
-	}
-	stop := make(chan struct{})
-	s.mu.Lock()
-	s.gcStop = stop
-	s.mu.Unlock()
-	go s.dailyGCLoop(hhmm, stop)
-	fmt.Printf("[script] 每日 GC 已设置: %s\n", hhmm)
-	return nil
-}
-
-func (s *scriptController) dailyGCLoop(hhmm string, stop <-chan struct{}) {
-	for {
-		now := time.Now()
-		today, _ := time.ParseInLocation("15:04", hhmm, now.Location())
-		next := time.Date(now.Year(), now.Month(), now.Day(), today.Hour(), today.Minute(), 0, 0, now.Location())
-		if !next.After(now) {
-			next = next.Add(24 * time.Hour)
-		}
-		timer := time.NewTimer(time.Until(next))
-		select {
-		case <-timer.C:
-			s.RunGCNow()
-		case <-stop:
-			timer.Stop()
-			return
-		}
-	}
-}
-
-func handleScriptConsole(parts []string, cfg *config.Config, saveScript func() error, ctl *scriptController) {
-	if ctl == nil {
-		fmt.Println("script 控制器未初始化")
-		return
-	}
-	if len(parts) == 1 || strings.EqualFold(parts[1], "help") {
-		fmt.Println("script 用法:")
-		fmt.Println("  script help")
-		fmt.Println("  script file")
-		fmt.Println("  script gc now")
-		fmt.Println("  script gc daily <HH:MM|off>")
-		fmt.Println("  script startup list")
-		fmt.Println("  script startup add <delaySec> <js|node|go> <target> [args...]")
-		fmt.Println("  script startup del <index>")
-		return
-	}
-	switch strings.ToLower(parts[1]) {
-	case "file":
-		fmt.Printf("script 配置文件: %s\n", cfg.Script.File)
-	case "gc":
-		if len(parts) < 3 {
-			fmt.Println("用法: script gc now | script gc daily <HH:MM|off>")
-			return
-		}
-		switch strings.ToLower(parts[2]) {
-		case "now":
-			ctl.RunGCNow()
-		case "daily":
-			if len(parts) < 4 {
-				fmt.Println("用法: script gc daily <HH:MM|off>")
-				return
-			}
-			val := strings.TrimSpace(parts[3])
-			if err := ctl.SetDailyGC(val); err != nil {
-				fmt.Printf("设置每日 GC 失败: %v\n", err)
-				return
-			}
-			cfg.Script.DailyGCTime = val
-			_ = saveScript()
-		default:
-			fmt.Println("用法: script gc now | script gc daily <HH:MM|off>")
-		}
-	case "startup":
-		if len(parts) < 3 {
-			fmt.Println("用法: script startup list|add|del ...")
-			return
-		}
-		switch strings.ToLower(parts[2]) {
-		case "list":
-			if len(cfg.Script.StartupTasks) == 0 {
-				fmt.Println("当前无开机脚本任务")
-				return
-			}
-			for i, t := range cfg.Script.StartupTasks {
-				fmt.Printf("[%d] delay=%ds runtime=%s target=%s args=%v\n", i, t.DelaySec, t.Runtime, t.Target, t.Args)
-			}
-		case "add":
-			if len(parts) < 6 {
-				fmt.Println("用法: script startup add <delaySec> <js|node|go> <target> [args...]")
-				return
-			}
-			delay, err := strconv.Atoi(parts[3])
-			if err != nil || delay < 0 {
-				fmt.Println("delaySec 必须是 >=0 的整数")
-				return
-			}
-			task := config.ScriptTask{
-				DelaySec: delay,
-				Runtime:  strings.ToLower(parts[4]),
-				Target:   parts[5],
-				Args:     append([]string(nil), parts[6:]...),
-			}
-			cfg.Script.StartupTasks = append(cfg.Script.StartupTasks, task)
-			_ = saveScript()
-			fmt.Println("已添加开机脚本任务（下次启动自动执行）")
-		case "del":
-			if len(parts) < 4 {
-				fmt.Println("用法: script startup del <index>")
-				return
-			}
-			idx, err := strconv.Atoi(parts[3])
-			if err != nil || idx < 0 || idx >= len(cfg.Script.StartupTasks) {
-				fmt.Println("index 无效")
-				return
-			}
-			cfg.Script.StartupTasks = append(cfg.Script.StartupTasks[:idx], cfg.Script.StartupTasks[idx+1:]...)
-			_ = saveScript()
-			fmt.Println("已删除开机脚本任务")
-		default:
-			fmt.Println("用法: script startup list|add|del ...")
-		}
-	default:
-		fmt.Println("用法: script help")
-	}
-}
-
-func printServerProgress(cfg config.Config, apiEnabled bool, scriptCtl *scriptController) {
-	items := []struct {
-		Name string
-		Done bool
-	}{
-		{"网络协议握手/连接管理", true},
-		{"地图与 MSAV 读写/快照", true},
-		{"OP 权限与运行快照", true},
-		{"召唤指令与写回", true},
-		{"API 多 Key 与管理命令", len(cfg.API.Keys) >= 0},
-		{"API 管理接口(/help,/ops,/summon,/stop)", apiEnabled},
-		{"脚本执行(js/node/go)", true},
-		{"脚本自动化(启动任务/每日GC)", scriptCtl != nil},
-		{"分类 help + 中文备注 + 高亮", true},
-	}
-	done := 0
-	for _, it := range items {
-		if it.Done {
-			done++
-		}
-	}
-	percent := int(float64(done) * 100 / float64(len(items)))
-	fmt.Printf("服务器当前进度: %d%% (%d/%d)\n", percent, done, len(items))
-	for _, it := range items {
-		flag := "✗"
-		if it.Done {
-			flag = "✓"
-		}
-		fmt.Printf("  [%s] %s\n", flag, it.Name)
-	}
 }
 
 func printCompatStatus(cfg config.Config, srv *netserver.Server) {

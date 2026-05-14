@@ -23,6 +23,7 @@ type Context struct {
 }
 
 // NewContext 创建一个新的插件上下文。
+// 若 logger 为 nil 则自动创建默认 logger。
 func NewContext(
 	srv ServerInterface,
 	wld WorldInterface,
@@ -32,6 +33,9 @@ func NewContext(
 	events *EventBus,
 	logger *Logger,
 ) *Context {
+	if logger == nil {
+		logger = NewLogger("plugin")
+	}
 	return &Context{
 		Server:          srv,
 		World:           wld,

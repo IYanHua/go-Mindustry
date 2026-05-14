@@ -31,7 +31,7 @@ func (p *StatusBarPlugin) Init(ctx *plugin.Context) error {
 	p.startTime = time.Now()
 	p.loadConfig(ctx.Config)
 
-	ctx.Events.OnConfigReload = append(ctx.Events.OnConfigReload, func() {
+	ctx.Events.OnConfigReload(func() {
 		p.loadConfig(ctx.Config)
 	})
 	return nil

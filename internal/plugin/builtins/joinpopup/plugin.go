@@ -57,10 +57,10 @@ func (p *JoinPopupPlugin) Init(ctx *plugin.Context) error {
 	p.chatCommands = ctx.ChatCommands
 	p.loadConfig(ctx.Config)
 
-	ctx.Events.OnConfigReload = append(ctx.Events.OnConfigReload, func() {
+	ctx.Events.OnConfigReload(func() {
 		p.loadConfig(ctx.Config)
 	})
-	ctx.Events.OnPlayerJoin = append(ctx.Events.OnPlayerJoin, func(c plugin.ConnInterface) {
+	ctx.Events.OnPlayerJoin(func(c plugin.ConnInterface) {
 		p.showForConn(c)
 	})
 	return nil

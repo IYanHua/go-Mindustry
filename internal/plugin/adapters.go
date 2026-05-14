@@ -15,8 +15,9 @@ func (a *connAdapter) UUID() string             { return a.c.UUID() }
 func (a *connAdapter) USID() string             { return a.c.USID() }
 func (a *connAdapter) Name() string             { return a.c.Name() }
 func (a *connAdapter) RemoteAddrString() string { return a.c.RemoteAddr().String() }
-func (a *connAdapter) IsConnected() bool    { return true }
-func (a *connAdapter) TeamID() world.TeamID  { return world.TeamID(a.c.TeamID()) }
+func (a *connAdapter) IsConnected() bool        { return a.c.IsConnected() }
+func (a *connAdapter) TeamID() world.TeamID     { return world.TeamID(a.c.TeamID()) }
+func (a *connAdapter) IsAdmin() bool            { return a.c.IsAdmin() }
 
 // WrapConn 将 *net.Conn 包装为 ConnInterface。
 func WrapConn(c *net.Conn) ConnInterface {
@@ -55,6 +56,15 @@ func (a *serverAdapter) ListConnectedConns() []ConnInterface {
 
 func (a *serverAdapter) KickByID(id int32, reason string) bool {
 	return a.s.KickByID(id, reason)
+}
+
+func (a *serverAdapter) ConnByID(id int32) ConnInterface {
+	for _, c := range a.s.ListConnectedConns() {
+		if c.ConnID() == id {
+			return WrapConn(c)
+		}
+	}
+	return nil
 }
 
 func (a *serverAdapter) ServerName() string {
@@ -135,6 +145,14 @@ func (a *serverAdapter) SendChat(c ConnInterface, message string) {
 	}
 }
 
+func (a *serverAdapter) BroadcastSetHudTextReliable(message string) {
+	a.s.BroadcastSetHudTextReliable(message)
+}
+
+func (a *serverAdapter) BroadcastHideHudText() {
+	a.s.BroadcastHideHudText()
+}
+
 // chatAdapter 用于将 ConnInterface 转回 *net.Conn
 func unwrapConn(c ConnInterface) *net.Conn {
 	if ca, ok := c.(*connAdapter); ok {
@@ -158,6 +176,8 @@ func (a *worldAdapter) SetPaused(paused bool)                    { a.w.SetPaused
 func (a *worldAdapter) IsPaused() bool                           { return a.w.IsPaused() }
 func (a *worldAdapter) SetGameOver(v bool)                       { a.w.SetGameOver(v) }
 func (a *worldAdapter) IsGameOver() bool                         { return a.w.IsGameOver() }
+func (a *worldAdapter) TickNumber() int64                        { return int64(a.w.Snapshot().Tick) }
+func (a *worldAdapter) WaveTime() float32                        { return a.w.Snapshot().WaveTime }
 func (a *worldAdapter) CurrentWave() int32                       { return a.w.CurrentWave() }
 func (a *worldAdapter) TriggerWave()                             { a.w.TriggerWave() }
 func (a *worldAdapter) FillTeamCoreItems(team world.TeamID)      { a.w.FillTeamCoreItems(team) }

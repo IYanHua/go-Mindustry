@@ -1,4 +1,4 @@
-package main
+package unitcommands
 
 import (
 	"strings"
@@ -36,7 +36,7 @@ const (
 	maxStuckTicks          uint64  = 30  // 卡住超过30秒则重置
 )
 
-type unitCommandService struct {
+type Service struct {
 	mu      sync.RWMutex
 	byUnit  map[int32]*protocol.ControllerState
 	runtime map[int32]unitCommandRuntime
@@ -63,8 +63,8 @@ type unitCommandRuntime struct {
 	stuckTicks     int
 }
 
-func newUnitCommandService() *unitCommandService {
-	return &unitCommandService{
+func NewService() *Service {
+	return &Service{
 		byUnit:  make(map[int32]*protocol.ControllerState),
 		runtime: make(map[int32]unitCommandRuntime),
 	}
@@ -80,7 +80,7 @@ func cloneControllerStateDeep(src *protocol.ControllerState) *protocol.Controlle
 	return &out
 }
 
-func (s *unitCommandService) ensureLocked(unitID int32) *protocol.ControllerState {
+func (s *Service) ensureLocked(unitID int32) *protocol.ControllerState {
 	state, ok := s.byUnit[unitID]
 	if !ok || state == nil {
 		state = &protocol.ControllerState{
@@ -106,7 +106,7 @@ func (s *unitCommandService) ensureLocked(unitID int32) *protocol.ControllerStat
 	return state
 }
 
-func (s *unitCommandService) remove(unitID int32) {
+func (s *Service) Remove(unitID int32) {
 	if s == nil || unitID == 0 {
 		return
 	}
@@ -117,7 +117,7 @@ func (s *unitCommandService) remove(unitID int32) {
 }
 
 // 修复：改进的超时检测和卡住检测
-func (s *unitCommandService) checkAndUpdateRuntime(tick uint64, unitID int32, x, y float32) {
+func (s *Service) checkAndUpdateRuntime(tick uint64, unitID int32, x, y float32) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
@@ -157,7 +157,7 @@ func (s *unitCommandService) checkAndUpdateRuntime(tick uint64, unitID int32, x,
 	runtime.lastY = y
 }
 
-func (s *unitCommandService) overlay(units []protocol.UnitSyncEntity) []protocol.UnitSyncEntity {
+func (s *Service) Overlay(units []protocol.UnitSyncEntity) []protocol.UnitSyncEntity {
 	if s == nil || len(units) == 0 {
 		return units
 	}
@@ -182,7 +182,7 @@ func (s *unitCommandService) overlay(units []protocol.UnitSyncEntity) []protocol
 	return out
 }
 
-func (s *unitCommandService) step(wld *world.World) {
+func (s *Service) Step(wld *world.World) {
 	if s == nil || wld == nil {
 		return
 	}
@@ -278,7 +278,7 @@ func (s *unitCommandService) step(wld *world.World) {
 	}
 }
 
-func (s *unitCommandService) applySetUnitCommand(c *netserver.Conn, wld *world.World, unitIDs []int32, command *protocol.UnitCommand) {
+func (s *Service) ApplySetUnitCommand(c *netserver.Conn, wld *world.World, unitIDs []int32, command *protocol.UnitCommand) {
 	if s == nil || c == nil || wld == nil || len(unitIDs) == 0 || command == nil {
 		return
 	}
@@ -313,7 +313,7 @@ func (s *unitCommandService) applySetUnitCommand(c *netserver.Conn, wld *world.W
 	}
 }
 
-func (s *unitCommandService) applySetUnitStance(c *netserver.Conn, wld *world.World, unitIDs []int32, stance protocol.UnitStance, enable bool) {
+func (s *Service) ApplySetUnitStance(c *netserver.Conn, wld *world.World, unitIDs []int32, stance protocol.UnitStance, enable bool) {
 	if s == nil || c == nil || wld == nil || len(unitIDs) == 0 {
 		return
 	}
@@ -384,7 +384,7 @@ func (s *unitCommandService) applySetUnitStance(c *netserver.Conn, wld *world.Wo
 	}
 }
 
-func (s *unitCommandService) applyCommandUnits(c *netserver.Conn, wld *world.World, unitIDs []int32, buildTarget any, unitTarget any, posTarget any, queueCommand bool) {
+func (s *Service) ApplyCommandUnits(c *netserver.Conn, wld *world.World, unitIDs []int32, buildTarget any, unitTarget any, posTarget any, queueCommand bool) {
 	if s == nil || c == nil || wld == nil || len(unitIDs) == 0 {
 		return
 	}

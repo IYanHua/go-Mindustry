@@ -3,7 +3,11 @@ package plugin
 import (
 	"fmt"
 	"log"
+	"os"
+	"path/filepath"
 	"sync"
+
+	goPlugin "plugin"
 
 	"github.com/IYanHua/mdt-server/internal/config"
 )
@@ -138,6 +142,56 @@ func (m *Manager) StopAll() {
 		_ = inst.plugin.Stop()
 		inst.state = StateStopped
 	}
+}
+
+// LoadFromFile 从单个 .so 文件加载一个插件。
+func (m *Manager) LoadFromFile(path string) error {
+	p, err := goPlugin.Open(path)
+	if err != nil {
+		return fmt.Errorf("plugin open %s: %w", path, err)
+	}
+	sym, err := p.Lookup("Plugin")
+	if err != nil {
+		return fmt.Errorf("plugin %s: symbol Plugin not found: %w", path, err)
+	}
+	plug, ok := sym.(Plugin)
+	if !ok {
+		// Try *Plugin
+		plugPtr, ok := sym.(*Plugin)
+		if !ok {
+			return fmt.Errorf("plugin %s: symbol Plugin is not plugin.Plugin (got %T)", path, sym)
+		}
+		plug = *plugPtr
+	}
+	if err := m.RegisterBuiltin(plug); err != nil {
+		return fmt.Errorf("plugin %s: %w", path, err)
+	}
+	log.Printf("[plugin] loaded external: %s (%s)", plug.ID(), filepath.Base(path))
+	return nil
+}
+
+// LoadFromDir 扫描目录中的 .so 文件并加载它们。
+func (m *Manager) LoadFromDir(dir string) (int, error) {
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return 0, nil
+		}
+		return 0, err
+	}
+	loaded := 0
+	for _, e := range entries {
+		if e.IsDir() || filepath.Ext(e.Name()) != ".so" {
+			continue
+		}
+		path := filepath.Join(dir, e.Name())
+		if err := m.LoadFromFile(path); err != nil {
+			log.Printf("[plugin] skip %s: %v", e.Name(), err)
+			continue
+		}
+		loaded++
+	}
+	return loaded, nil
 }
 
 // LoadedPlugins 返回所有已加载插件的 ID 和状态。
